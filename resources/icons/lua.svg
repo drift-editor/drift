@@ -1,0 +1,8 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="16" height="16" rx="2" fill="#2C2D72"/>
+  <circle cx="8" cy="8" r="5" fill="white"/>
+  <circle cx="8" cy="8" r="3" fill="#2C2D72"/>
+  <circle cx="11" cy="5" r="2" fill="white"/>
+  <circle cx="11" cy="5" r="1" fill="#2C2D72"/>
+  <text x="8" y="14" text-anchor="middle" font-family="Arial, sans-serif" font-size="3" font-weight="bold" fill="white">LUA</text>
+</svg>

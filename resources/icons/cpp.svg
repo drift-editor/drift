@@ -1,0 +1,7 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="8" cy="8" r="6" fill="none" stroke="#00599C" stroke-width="1.5"/>
+  <path d="M8 4C10.2 4 12 5.8 12 8C12 10.2 10.2 12 8 12" fill="none" stroke="#00599C" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="6" y="10" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" font-weight="bold" fill="#00599C">C</text>
+  <path d="M9.5 6.5V9.5M8.5 8H10.5" stroke="#00599C" stroke-width="1" stroke-linecap="round"/>
+  <path d="M12 6.5V9.5M11 8H13" stroke="#00599C" stroke-width="1" stroke-linecap="round"/>
+</svg>

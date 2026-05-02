@@ -1,0 +1,6 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="1" y="2" width="14" height="12" rx="1" fill="none" stroke="#0969DA" stroke-width="1"/>
+  <path d="M3 12V4L5 6L7 4V12" fill="none" stroke="#0969DA" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M9 7L11 5V11L13 9" fill="none" stroke="#0969DA" stroke-width="1.5" stroke-linejoin="round"/>
+  <text x="8" y="15.5" text-anchor="middle" font-family="Arial, sans-serif" font-size="2" font-weight="bold" fill="#0969DA">MD</text>
+</svg>

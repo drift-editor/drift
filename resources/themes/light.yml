@@ -1,0 +1,35 @@
+name: light
+
+# UI Colors
+colors:
+  background:       "#FAFAFA"
+  surface:          "#FFFFFF"
+  surfaceHover:     "#F0F0F0"
+  border:           "#C8C8C8"
+  text:             "#1E1E1E"
+  textSecondary:    "#646464"
+  textDisabled:     "#969696"
+  accent:           "#0066CC"
+  accentHover:      "#0077E6"
+  cursor:           "#000000"
+  selection:        "#ADD6FF"
+  lineNumber:       "#555555"
+  lineNumberActive: "#1E1E1E"
+  gutter:           "#F5F5F5"
+  success:          "#28A745"
+  warning:          "#FF8C00"
+  error:            "#DC3545"
+  info:             "#17A2B8"
+
+# Syntax Colors
+syntax:
+  default:     "#1E1E1E"
+  keyword:     "#AF00DB"
+  string:      "#A31515"
+  comment:     "#008000"
+  number:      "#098658"
+  function:    "#795E26"
+  type:        "#267F99"
+  variable:    "#1E1E1E"
+  operator:    "#646464"
+  punctuation: "#505050"

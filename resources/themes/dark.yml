@@ -1,0 +1,36 @@
+name: dark
+
+# UI Colors
+# Supports formats chroma accepts: #RRGGBB, #RGB, RRGGBB, rgb(r,g,b), etc.
+colors:
+  background:       "#0F1116"
+  surface:          "#16181D"
+  surfaceHover:     "#1E2128"
+  border:           "#23262F"
+  text:             "#99A1B3"
+  textSecondary:    "#656C7D"
+  textDisabled:     "#464B5A"
+  accent:           "#4B92FF"
+  accentHover:      "#64A5FF"
+  cursor:           "#FFFFFF"
+  selection:        "#232832"
+  lineNumber:       "#414655"
+  lineNumberActive: "#828A9B"
+  gutter:           "#121419"
+  success:          "#50B464"
+  warning:          "#DCA03C"
+  error:            "#DC5A5A"
+  info:             "#5096DC"
+
+# Syntax Colors
+syntax:
+  default:     "#99A1B3"
+  keyword:     "#C58DDE"
+  string:      "#A5D16D"
+  comment:     "#5C6370"
+  number:      "#6CB6EB"
+  function:    "#D4A46A"
+  type:        "#5DAFA8"
+  variable:    "#99A1B3"
+  operator:    "#8B92A8"
+  punctuation: "#8B92A8"

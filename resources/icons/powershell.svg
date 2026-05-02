@@ -1,0 +1,6 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="16" height="16" rx="2" fill="#5391FE"/>
+  <path d="M3 5L7 8L3 11V9L5 8L3 7V5Z" fill="white"/>
+  <path d="M8 10H12V11H8V10Z" fill="white"/>
+  <text x="8" y="14" text-anchor="middle" font-family="Arial, sans-serif" font-size="2" font-weight="bold" fill="white">PS</text>
+</svg>

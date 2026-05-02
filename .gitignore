@@ -1,0 +1,28 @@
+# ignore files with no extention:
+*
+!*/
+!*.*
+!LICENSE
+!LICENSE-AGPL
+deps/
+src_old_backup
+# normal ignores:
+*.exe
+*.out
+nimcache
+*.pdb
+*.ilk
+.*
+!.gitignore
+*.dll
+__pycache__
+bindings/generated
+/config.json
+/config.default.json
+/resources/themes/default.json
+/build
+/build-*
+/local-experiments
+nimble.develop
+nimble.paths
+nimbledeps

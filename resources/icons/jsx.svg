@@ -1,0 +1,8 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="16" height="16" rx="2" fill="#61DAFB"/>
+  <ellipse cx="8" cy="8" rx="6" ry="2.5" fill="none" stroke="#000" stroke-width="1"/>
+  <ellipse cx="8" cy="8" rx="6" ry="2.5" fill="none" stroke="#000" stroke-width="1" transform="rotate(60 8 8)"/>
+  <ellipse cx="8" cy="8" rx="6" ry="2.5" fill="none" stroke="#000" stroke-width="1" transform="rotate(-60 8 8)"/>
+  <circle cx="8" cy="8" r="1.5" fill="#000"/>
+  <text x="8" y="14" text-anchor="middle" font-family="Arial, sans-serif" font-size="4" font-weight="bold" fill="#000">JSX</text>
+</svg>

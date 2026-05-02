@@ -1,0 +1,31 @@
+{
+    "cActive": "DDDDDD",
+    "cInActive": "AAAAAA",
+    "cMiddle": "555555",
+
+    "bgScrollBar": "303030",
+    "bgVerticalLine": "404040",
+    "bgLineNumbers": "202020",
+    "bgLineNumbersSelect": "0f0f0f",
+    "bgTextArea": "202020",
+    "bgStatusBar": "161616",
+    "bgExplorer": "262626",
+    "bgSelectionLabel": "38AFFF",
+    "bgSelection": "303030",
+    "bgTitleBar": "202020",
+    "bgTitleBarSelect": "262626",
+
+    "sKeyword": "569cd6",
+    "sOperatorWord": "569cd6",
+    "sBuiltinType": "569cd6",
+    "sControlFlow": "c586c0",
+    "sType": "4ec9b0",
+    "sStringLit": "ce9178",
+    "sStringLitEscape": "f2e1a2",
+    "sNumberLit": "b5cea8",
+    "sFunction": "dcdcaa",
+    "sComment": "6a9955",
+    "sTodoComment": "ff8c00",
+    "sLineNumber": "858585",
+    "sText": "d4d4d4"
+}

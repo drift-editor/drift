@@ -1,0 +1,9 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="2" y="2" width="12" height="12" rx="1" fill="none" stroke="#CB171E" stroke-width="1"/>
+  <path d="M4 5L6 5M4 7L8 7M6 9L10 9M4 11L7 11" stroke="#CB171E" stroke-width="1" stroke-linecap="round"/>
+  <circle cx="4" cy="5" r="0.5" fill="#CB171E"/>
+  <circle cx="4" cy="7" r="0.5" fill="#CB171E"/>
+  <circle cx="6" cy="9" r="0.5" fill="#CB171E"/>
+  <circle cx="4" cy="11" r="0.5" fill="#CB171E"/>
+  <text x="8" y="14.5" text-anchor="middle" font-family="Arial, sans-serif" font-size="3" font-weight="bold" fill="#CB171E">YAML</text>
+</svg>

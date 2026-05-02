@@ -1,0 +1,7 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="16" height="16" rx="2" fill="#00ADD8"/>
+  <path d="M3 6C3 5.5 3.5 5 4 5H6C6.5 5 7 5.5 7 6V7C7 7.5 6.5 8 6 8H4C3.5 8 3 7.5 3 7V6Z" fill="white"/>
+  <path d="M9 6C9 5.5 9.5 5 10 5H12C12.5 5 13 5.5 13 6V7C13 7.5 12.5 8 12 8H10C9.5 8 9 7.5 9 7V6Z" fill="white"/>
+  <path d="M6 9C6 8.5 6.5 8 7 8H9C9.5 8 10 8.5 10 9V10C10 10.5 9.5 11 9 11H7C6.5 11 6 10.5 6 10V9Z" fill="white"/>
+  <text x="8" y="14" text-anchor="middle" font-family="Arial, sans-serif" font-size="3" font-weight="bold" fill="white">GO</text>
+</svg>
