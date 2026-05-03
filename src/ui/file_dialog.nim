@@ -298,14 +298,14 @@ elif defined(windows):
     ofn.Flags = OFN_HIDEREADONLY or OFN_PATHMUSTEXIST or OFN_NOCHANGEDIR
 
     var buffer = newString(MAX_PATH)
-    ofn.lpstrFile = cast[uint](cast[pointer](buffer.cstring))
+    ofn.lpstrFile = cast[uint](unsafeAddr buffer[0])
     ofn.nMaxFile = MAX_PATH.int32
 
     let filterStr = buildFilterString(di.filters)
-    ofn.lpstrFilter = cast[uint](cast[pointer](filterStr.cstring))
-    ofn.lpstrTitle = cast[uint](cast[pointer](di.title.cstring))
+    ofn.lpstrFilter = cast[uint](unsafeAddr filterStr[0])
+    ofn.lpstrTitle = cast[uint](unsafeAddr di.title[0])
     ofn.lpstrInitialDir = if di.folder.len > 0:
-      cast[uint](cast[pointer](di.folder.cstring)) else: 0'u
+      cast[uint](unsafeAddr di.folder[0]) else: 0'u
 
     var success: int32
     case di.kind:
@@ -315,7 +315,7 @@ elif defined(windows):
     of dkSaveFile:
       ofn.Flags = ofn.Flags or OFN_OVERWRITEPROMPT
       ofn.lpstrDefExt = if di.extension.len > 0:
-        cast[uint](cast[pointer](di.extension.cstring)) else: 0'u
+        cast[uint](unsafeAddr di.extension[0]) else: 0'u
       success = GetSaveFileNameA(ofn)
     else:
       dealloc(ofn)
