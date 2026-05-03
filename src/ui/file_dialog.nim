@@ -245,6 +245,12 @@ elif defined(windows):
   import std/[winlean, sequtils]
 
   type
+    HWND = Handle
+    HINSTANCE = Handle
+    LPARAM = int
+    WORD = uint16
+    BOOL = WINBOOL
+
     OPENFILENAMEA {.importc: "OPENFILENAMEA", header: "<windows.h>".} = object
       lStructSize: DWORD
       hwndOwner: HWND
