@@ -242,34 +242,28 @@ elif defined(linux) and not defined(android) and not defined(emscripten):
     return none(string)
 
 elif defined(windows):
-  import std/[winlean, sequtils]
+  import std/sequtils
 
   type
-    HWND = int
-    HINSTANCE = int
-    LPARAM = int
-    WORD = uint16
-    BOOL = int32
-
     OPENFILENAMEA {.importc: "OPENFILENAMEA", header: "<windows.h>".} = object
-      lStructSize: DWORD
-      hwndOwner: HWND
-      hInstance: HINSTANCE
+      lStructSize: int32
+      hwndOwner: int
+      hInstance: int
       lpstrFilter: cstring
       lpstrCustomFilter: cstring
-      nMaxCustFilter: DWORD
-      nFilterIndex: DWORD
+      nMaxCustFilter: int32
+      nFilterIndex: int32
       lpstrFile: cstring
-      nMaxFile: DWORD
+      nMaxFile: int32
       lpstrFileTitle: cstring
-      nMaxFileTitle: DWORD
+      nMaxFileTitle: int32
       lpstrInitialDir: cstring
       lpstrTitle: cstring
-      Flags: DWORD
-      nFileOffset: WORD
-      nFileExtension: WORD
+      Flags: int32
+      nFileOffset: uint16
+      nFileExtension: uint16
       lpstrDefExt: cstring
-      lCustData: LPARAM
+      lCustData: int
       lpfnHook: pointer
       lpTemplateName: cstring
 
@@ -281,8 +275,8 @@ elif defined(windows):
     OFN_NOCHANGEDIR = 0x00000008
     MAX_PATH = 260
 
-  proc GetOpenFileNameA(lpofn: var OPENFILENAMEA): BOOL {.importc, stdcall, dynlib: "comdlg32.dll".}
-  proc GetSaveFileNameA(lpofn: var OPENFILENAMEA): BOOL {.importc, stdcall, dynlib: "comdlg32.dll".}
+  proc GetOpenFileNameA(lpofn: var OPENFILENAMEA): int32 {.importc, stdcall, dynlib: "comdlg32.dll".}
+  proc GetSaveFileNameA(lpofn: var OPENFILENAMEA): int32 {.importc, stdcall, dynlib: "comdlg32.dll".}
 
   proc buildFilterString(filters: seq[DialogFilter]): string =
     if filters.len == 0:
@@ -297,19 +291,19 @@ elif defined(windows):
 
   proc show*(di: DialogInfo): Option[string] =
     var ofn: OPENFILENAMEA
-    ofn.lStructSize = sizeof(OPENFILENAMEA).DWORD
+    ofn.lStructSize = sizeof(OPENFILENAMEA).int32
     ofn.Flags = OFN_HIDEREADONLY or OFN_PATHMUSTEXIST or OFN_NOCHANGEDIR
 
     var buffer = newString(MAX_PATH)
     ofn.lpstrFile = buffer.cstring
-    ofn.nMaxFile = MAX_PATH.DWORD
+    ofn.nMaxFile = MAX_PATH.int32
 
     let filterStr = buildFilterString(di.filters)
     ofn.lpstrFilter = filterStr.cstring
     ofn.lpstrTitle = di.title.cstring
     ofn.lpstrInitialDir = if di.folder.len > 0: di.folder.cstring else: nil
 
-    var success: BOOL
+    var success: int32
     case di.kind:
     of dkOpenFile:
       ofn.Flags = ofn.Flags or OFN_FILEMUSTEXIST
@@ -321,7 +315,7 @@ elif defined(windows):
     else:
       return none(string)
 
-    if success.bool:
+    if success != 0:
       var path = $ofn.lpstrFile
       let nullPos = path.find('\0')
       if nullPos >= 0:
