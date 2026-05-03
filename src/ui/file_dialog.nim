@@ -322,7 +322,12 @@ elif defined(windows):
       return none(string)
 
     if success != 0:
-      var path = $cast[cstring](cast[pointer](ofn.lpstrFile))
+      var cptr = cast[ptr UncheckedArray[char]](ofn.lpstrFile)
+      var path = ""
+      var i = 0
+      while cptr[i] != '\0':
+        path.add(cptr[i])
+        inc i
       di.checkExtensionOnSave(path)
       dealloc(ofn)
       return some(path)
