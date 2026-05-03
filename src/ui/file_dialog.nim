@@ -323,9 +323,6 @@ elif defined(windows):
 
     if success != 0:
       var path = $cast[cstring](cast[pointer](ofn.lpstrFile))
-      let nullPos = path.find('\0')
-      if nullPos >= 0:
-        path = path[0..<nullPos]
       di.checkExtensionOnSave(path)
       dealloc(ofn)
       return some(path)
