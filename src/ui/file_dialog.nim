@@ -242,8 +242,6 @@ elif defined(linux) and not defined(android) and not defined(emscripten):
     return none(string)
 
 elif defined(windows):
-  import std/sequtils
-
   type
     OPENFILENAMEA {.importc: "OPENFILENAMEA", header: "<windows.h>".} = object
       lStructSize: int32
