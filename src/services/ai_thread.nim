@@ -220,7 +220,8 @@ proc aiThreadProc(t: AIThread) {.thread.} =
     return
 
   let outFd = outputHandle(p)
-  setNonBlocking(outFd)
+  when defined(posix):
+    setNonBlocking(outFd)
 
   # --- Initialize ---
   var nextId = 1
