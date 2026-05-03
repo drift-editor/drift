@@ -45,15 +45,16 @@ proc sendResponse(t: AIThread, msg: AIMessage) {.inline.} =
       stderr.writeLine("[ai-thread] WARNING: dropped response, channel full after 100ms")
       break
 
-proc setNonBlocking(fd: cint) =
-  var flags = fcntl(fd, F_GETFL, 0)
-  discard fcntl(fd, F_SETFL, flags or O_NONBLOCK)
+proc setNonBlocking(fd: FileHandle) =
+  let fd32 = fd.int32
+  var flags = fcntl(fd32, F_GETFL, 0)
+  discard fcntl(fd32, F_SETFL, flags or O_NONBLOCK)
 
-proc readAvailable(fd: cint): string =
+proc readAvailable(fd: FileHandle): string =
   var buf: array[4096, char]
   result = ""
   while true:
-    let n = posix.read(fd, addr buf[0], 4096)
+    let n = posix.read(fd.int32, addr buf[0], 4096)
     if n > 0:
       var s = newString(n)
       copyMem(addr s[0], addr buf[0], n)
