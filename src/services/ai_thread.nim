@@ -3,7 +3,8 @@
 ## ACP is JSON-RPC 2.0 over stdio.
 
 import std/[options, json, os, osproc, strutils, streams]
-import std/posix
+when defined(posix):
+  import std/posix
 import ../channel_spsc
 import git as gitcmd
 
@@ -39,30 +40,37 @@ proc sendResponse(t: AIThread, msg: AIMessage) {.inline.} =
   while not channel_spsc.trySend(t.respChan, msg):
     if t.respChan.isClosed: return
     if retries < 100:
-      discard usleep(1000)  # 1ms backoff
+      sleep(1)  # 1ms backoff
       inc retries
     else:
       stderr.writeLine("[ai-thread] WARNING: dropped response, channel full after 100ms")
       break
 
-proc setNonBlocking(fd: FileHandle) =
-  let fd32 = fd.int32
-  var flags = fcntl(fd32, F_GETFL, 0)
-  discard fcntl(fd32, F_SETFL, flags or O_NONBLOCK)
+when defined(posix):
+  proc setNonBlocking(fd: FileHandle) =
+    let fd32 = fd.int32
+    var flags = fcntl(fd32, F_GETFL, 0)
+    discard fcntl(fd32, F_SETFL, flags or O_NONBLOCK)
 
-proc readAvailable(fd: FileHandle): string =
-  var buf: array[4096, char]
-  result = ""
-  while true:
-    let n = posix.read(fd.int32, addr buf[0], 4096)
-    if n > 0:
-      var s = newString(n)
-      copyMem(addr s[0], addr buf[0], n)
-      result.add(s)
-    elif n < 0 and (errno == EAGAIN or errno == EWOULDBLOCK):
-      break
-    else:
-      break
+  proc readAvailable(fd: FileHandle): string =
+    var buf: array[4096, char]
+    result = ""
+    while true:
+      let n = posix.read(fd.int32, addr buf[0], 4096)
+      if n > 0:
+        var s = newString(n)
+        copyMem(addr s[0], addr buf[0], n)
+        result.add(s)
+      elif n < 0 and (errno == EAGAIN or errno == EWOULDBLOCK):
+        break
+      else:
+        break
+else:
+  proc setNonBlocking(fd: FileHandle) =
+    discard  # TODO: Windows non-blocking pipe
+
+  proc readAvailable(fd: FileHandle): string =
+    result = ""  # TODO: Windows non-blocking pipe read
 
 proc sendJsonRpc(p: Process, id: int, rpcMethod: string, params: JsonNode): int =
   let msg = %*{"jsonrpc": "2.0", "id": id, "method": rpcMethod, "params": params}
@@ -227,7 +235,7 @@ proc aiThreadProc(t: AIThread) {.thread.} =
   var initRetries = 0
 
   while not initDone:
-    discard usleep(10000)
+    sleep(10)
     inc initRetries
     if initRetries > 500:  # 5 second timeout
       t.sendResponse(AIMessage(kind: amkError, error: "ACP init timeout"))
@@ -265,7 +273,7 @@ proc aiThreadProc(t: AIThread) {.thread.} =
   var sessionDone = false
   var sessionRetries = 0
   while not sessionDone:
-    discard usleep(10000)
+    sleep(10)
     inc sessionRetries
     if sessionRetries > 500:  # 5 second timeout
       t.sendResponse(AIMessage(kind: amkError, error: "ACP session creation timeout"))
@@ -403,7 +411,7 @@ proc aiThreadProc(t: AIThread) {.thread.} =
       t.sendResponse(AIMessage(kind: amkError, error: "kimi acp process exited"))
       break
 
-    discard usleep(5000)  # 5ms
+    sleep(5)  # 5ms
 
 proc newAIThread*(): AIThread =
   result = AIThread(
