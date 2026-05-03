@@ -208,7 +208,7 @@ elif defined(linux) and not defined(android) and not defined(emscripten):
   """.}
 
   proc g_free(p: pointer) {.importc, nodecl, cdecl.}
-  proc drift_gtk4_file_dialog(kind: cint; title, folder: cstring;
+  proc drift_gtk4_file_dialog(kind: int32; title, folder: cstring;
                               filterNames, filterPatterns: ptr cstring;
                               filterCount: csize_t): cstring
     {.importc, nodecl, cdecl.}
@@ -221,9 +221,9 @@ elif defined(linux) and not defined(android) and not defined(emscripten):
       filterPatterns.add(f.ext.cstring)
 
     let kind = case di.kind:
-      of dkSaveFile: 1.cint
-      of dkSelectFolder: 2.cint
-      else: 0.cint
+      of dkSaveFile: 1.int32
+      of dkSelectFolder: 2.int32
+      else: 0.int32
 
     let cRes = drift_gtk4_file_dialog(
       kind,
