@@ -953,6 +953,9 @@ proc openBuffer(app: App, path: string): int =
     return -1
 
   if isImg:
+    if not backendSupportsRasterImages():
+      discard app.notificationManager.error("Image preview is not supported by this display backend.")
+      return -1
     let img = loadImage(path)
     if img.int == 0:
       discard app.notificationManager.error("Failed to load image: " & path.extractFilename)
@@ -2217,7 +2220,7 @@ proc run*(app: App) =
       if app.buffers[idx].isImage:
         # Draw image centered in editor bounds, preserving aspect ratio
         let b = app.buffers[idx]
-        if b.image.int != 0:
+        if b.image.int != 0 and backendSupportsRasterImages():
           let availW = editorBounds.w.float
           let availH = editorBounds.h.float
           let imgW = b.imageWidth.float
