@@ -293,13 +293,13 @@ elif defined(windows):
     ofn.Flags = OFN_HIDEREADONLY or OFN_PATHMUSTEXIST or OFN_NOCHANGEDIR
 
     var buffer = newString(MAX_PATH)
-    ofn.lpstrFile = buffer.cstring
+    ofn.lpstrFile = addr buffer[0]
     ofn.nMaxFile = MAX_PATH.int32
 
     let filterStr = buildFilterString(di.filters)
-    ofn.lpstrFilter = cast[pointer](filterStr.cstring)
-    ofn.lpstrTitle = cast[pointer](di.title.cstring)
-    ofn.lpstrInitialDir = if di.folder.len > 0: cast[pointer](di.folder.cstring) else: nil
+    ofn.lpstrFilter = addr filterStr[0]
+    ofn.lpstrTitle = addr di.title[0]
+    ofn.lpstrInitialDir = if di.folder.len > 0: addr di.folder[0] else: nil
 
     var success: int32
     case di.kind:
@@ -308,7 +308,7 @@ elif defined(windows):
       success = GetOpenFileNameA(ofn)
     of dkSaveFile:
       ofn.Flags = ofn.Flags or OFN_OVERWRITEPROMPT
-      ofn.lpstrDefExt = if di.extension.len > 0: cast[pointer](di.extension.cstring) else: nil
+      ofn.lpstrDefExt = if di.extension.len > 0: addr di.extension[0] else: nil
       success = GetSaveFileNameA(ofn)
     else:
       return none(string)
