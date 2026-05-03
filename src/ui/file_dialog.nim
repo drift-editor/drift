@@ -247,23 +247,23 @@ elif defined(windows):
       lStructSize: int32
       hwndOwner: int
       hInstance: int
-      lpstrFilter: cstring
-      lpstrCustomFilter: cstring
+      lpstrFilter: pointer
+      lpstrCustomFilter: pointer
       nMaxCustFilter: int32
       nFilterIndex: int32
-      lpstrFile: cstring
+      lpstrFile: pointer
       nMaxFile: int32
-      lpstrFileTitle: cstring
+      lpstrFileTitle: pointer
       nMaxFileTitle: int32
-      lpstrInitialDir: cstring
-      lpstrTitle: cstring
+      lpstrInitialDir: pointer
+      lpstrTitle: pointer
       Flags: int32
       nFileOffset: uint16
       nFileExtension: uint16
-      lpstrDefExt: cstring
+      lpstrDefExt: pointer
       lCustData: int
       lpfnHook: pointer
-      lpTemplateName: cstring
+      lpTemplateName: pointer
 
   const
     OFN_HIDEREADONLY = 0x00000004
@@ -297,9 +297,9 @@ elif defined(windows):
     ofn.nMaxFile = MAX_PATH.int32
 
     let filterStr = buildFilterString(di.filters)
-    ofn.lpstrFilter = filterStr.cstring
-    ofn.lpstrTitle = di.title.cstring
-    ofn.lpstrInitialDir = if di.folder.len > 0: di.folder.cstring else: nil
+    ofn.lpstrFilter = cast[pointer](filterStr.cstring)
+    ofn.lpstrTitle = cast[pointer](di.title.cstring)
+    ofn.lpstrInitialDir = if di.folder.len > 0: cast[pointer](di.folder.cstring) else: nil
 
     var success: int32
     case di.kind:
@@ -308,13 +308,13 @@ elif defined(windows):
       success = GetOpenFileNameA(ofn)
     of dkSaveFile:
       ofn.Flags = ofn.Flags or OFN_OVERWRITEPROMPT
-      ofn.lpstrDefExt = if di.extension.len > 0: di.extension.cstring else: nil
+      ofn.lpstrDefExt = if di.extension.len > 0: cast[pointer](di.extension.cstring) else: nil
       success = GetSaveFileNameA(ofn)
     else:
       return none(string)
 
     if success != 0:
-      var path = $ofn.lpstrFile
+      var path = $cast[cstring](ofn.lpstrFile)
       let nullPos = path.find('\0')
       if nullPos >= 0:
         path = path[0..<nullPos]
