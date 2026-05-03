@@ -279,8 +279,7 @@ elif defined(windows):
   }
   """.}
 
-  proc drift_win_file_dialog(kind: int32; title, folder, filter, defExt: cstring): cstring
-    {.importc, nodecl, cdecl.}
+  proc drift_win_file_dialog(kind: int32; title, folder, filter, defExt: cstring): cstring {.importc, nodecl, cdecl.}
   proc free(p: pointer) {.importc: "free", header: "<stdlib.h>".}
 
   proc buildFilterString(filters: seq[DialogFilter]): string =
