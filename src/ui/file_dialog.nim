@@ -245,11 +245,11 @@ elif defined(windows):
   import std/[winlean, sequtils]
 
   type
-    HWND = Handle
-    HINSTANCE = Handle
+    HWND = int
+    HINSTANCE = int
     LPARAM = int
     WORD = uint16
-    BOOL = WINBOOL
+    BOOL = int32
 
     OPENFILENAMEA {.importc: "OPENFILENAMEA", header: "<windows.h>".} = object
       lStructSize: DWORD
