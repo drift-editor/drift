@@ -247,9 +247,9 @@ elif defined(windows):
   #include <string.h>
   #include <stdlib.h>
 
-  static char *drift_win_file_dialog(int kind, const char *title,
-                                      const char *folder, const char *filter,
-                                      const char *defExt) {
+  char *drift_win_file_dialog(int kind, const char *title,
+                               const char *folder, const char *filter,
+                               const char *defExt) {
     char buffer[MAX_PATH] = {0};
     OPENFILENAMEA ofn = {0};
     ofn.lStructSize = sizeof(ofn);
@@ -279,7 +279,7 @@ elif defined(windows):
   }
   """.}
 
-  proc drift_win_file_dialog(kind: int32; title, folder, filter, defExt: cstring): cstring {.importc, nodecl, cdecl.}
+  proc drift_win_file_dialog(kind: int32; title, folder, filter, defExt: cstring): cstring {.importc, cdecl.}
   proc free(p: pointer) {.importc: "free", header: "<stdlib.h>".}
 
   proc buildFilterString(filters: seq[DialogFilter]): string =
