@@ -175,7 +175,7 @@ elif defined(linux) and not defined(android) and not defined(emscripten):
 
     if (folder && folder[0]) {
       GFile *f = g_file_new_for_path(folder);
-      gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), f);
+      gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), f, NULL);
       g_object_unref(f);
     }
 
