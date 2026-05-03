@@ -279,7 +279,7 @@ elif defined(windows):
   }
   """.}
 
-  proc drift_win_file_dialog(kind: cint; title, folder, filter, defExt: cstring): cstring
+  proc drift_win_file_dialog(kind: int32; title, folder, filter, defExt: cstring): cstring
     {.importc, nodecl, cdecl.}
   proc free(p: pointer) {.importc: "free", header: "<stdlib.h>".}
 
@@ -300,7 +300,7 @@ elif defined(windows):
 
     let filterStr = buildFilterString(di.filters)
     let cRes = drift_win_file_dialog(
-      (if di.kind == dkSaveFile: 1 else: 0).cint,
+      (if di.kind == dkSaveFile: 1 else: 0).int32,
       di.title.cstring,
       di.folder.cstring,
       filterStr.cstring,
