@@ -242,39 +242,46 @@ elif defined(linux) and not defined(android) and not defined(emscripten):
     return none(string)
 
 elif defined(windows):
-  type
-    OPENFILENAMEA {.importc: "OPENFILENAMEA", header: "<windows.h>".} = object
-      lStructSize: int32
-      hwndOwner: int
-      hInstance: int
-      lpstrFilter: pointer
-      lpstrCustomFilter: pointer
-      nMaxCustFilter: int32
-      nFilterIndex: int32
-      lpstrFile: pointer
-      nMaxFile: int32
-      lpstrFileTitle: pointer
-      nMaxFileTitle: int32
-      lpstrInitialDir: pointer
-      lpstrTitle: pointer
-      Flags: int32
-      nFileOffset: uint16
-      nFileExtension: uint16
-      lpstrDefExt: pointer
-      lCustData: int
-      lpfnHook: pointer
-      lpTemplateName: pointer
+  {.emit: """
+  #include <windows.h>
+  #include <string.h>
+  #include <stdlib.h>
 
-  const
-    OFN_HIDEREADONLY = 0x00000004
-    OFN_PATHMUSTEXIST = 0x00000800
-    OFN_FILEMUSTEXIST = 0x00001000
-    OFN_OVERWRITEPROMPT = 0x00000002
-    OFN_NOCHANGEDIR = 0x00000008
-    MAX_PATH = 260
+  static char *drift_win_file_dialog(int kind, const char *title,
+                                      const char *folder, const char *filter,
+                                      const char *defExt) {
+    char buffer[MAX_PATH] = {0};
+    OPENFILENAMEA ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile = buffer;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = title;
+    ofn.lpstrInitialDir = folder;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrDefExt = defExt;
+    ofn.Flags = OFN_HIDEREADONLY | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
-  proc GetOpenFileNameA(lpofn: var OPENFILENAMEA): int32 {.importc, stdcall, dynlib: "comdlg32.dll".}
-  proc GetSaveFileNameA(lpofn: var OPENFILENAMEA): int32 {.importc, stdcall, dynlib: "comdlg32.dll".}
+    int ok;
+    if (kind == 1) { /* save */
+      ofn.Flags |= OFN_OVERWRITEPROMPT;
+      ok = GetSaveFileNameA(&ofn);
+    } else { /* open */
+      ofn.Flags |= OFN_FILEMUSTEXIST;
+      ok = GetOpenFileNameA(&ofn);
+    }
+
+    if (ok) {
+      char *res = (char *)malloc(strlen(buffer) + 1);
+      strcpy(res, buffer);
+      return res;
+    }
+    return NULL;
+  }
+  """.}
+
+  proc drift_win_file_dialog(kind: cint; title, folder, filter, defExt: cstring): cstring
+    {.importc, nodecl, cdecl.}
+  proc free(p: pointer) {.importc: "free", header: "<stdlib.h>".}
 
   proc buildFilterString(filters: seq[DialogFilter]): string =
     if filters.len == 0:
@@ -288,36 +295,21 @@ elif defined(windows):
     result.add("\0")
 
   proc show*(di: DialogInfo): Option[string] =
-    var ofn: OPENFILENAMEA
-    ofn.lStructSize = sizeof(OPENFILENAMEA).int32
-    ofn.Flags = OFN_HIDEREADONLY or OFN_PATHMUSTEXIST or OFN_NOCHANGEDIR
-
-    var buffer = newString(MAX_PATH)
-    ofn.lpstrFile = addr buffer[0]
-    ofn.nMaxFile = MAX_PATH.int32
-
-    let filterStr = buildFilterString(di.filters)
-    ofn.lpstrFilter = addr filterStr[0]
-    ofn.lpstrTitle = addr di.title[0]
-    ofn.lpstrInitialDir = if di.folder.len > 0: addr di.folder[0] else: nil
-
-    var success: int32
-    case di.kind:
-    of dkOpenFile:
-      ofn.Flags = ofn.Flags or OFN_FILEMUSTEXIST
-      success = GetOpenFileNameA(ofn)
-    of dkSaveFile:
-      ofn.Flags = ofn.Flags or OFN_OVERWRITEPROMPT
-      ofn.lpstrDefExt = if di.extension.len > 0: addr di.extension[0] else: nil
-      success = GetSaveFileNameA(ofn)
-    else:
+    if di.kind == dkSelectFolder:
       return none(string)
 
-    if success != 0:
-      var path = $cast[cstring](ofn.lpstrFile)
-      let nullPos = path.find('\0')
-      if nullPos >= 0:
-        path = path[0..<nullPos]
+    let filterStr = buildFilterString(di.filters)
+    let cRes = drift_win_file_dialog(
+      (if di.kind == dkSaveFile: 1 else: 0).cint,
+      di.title.cstring,
+      di.folder.cstring,
+      filterStr.cstring,
+      if di.extension.len > 0: di.extension.cstring else: nil
+    )
+
+    if not cRes.isNil:
+      var path = $cRes
+      free(cRes)
       di.checkExtensionOnSave(path)
       return some(path)
     return none(string)
