@@ -1,4 +1,4 @@
-## Native file dialogs - no external tool calls
+## Native file dialogs — no external tool calls
 
 import std/[strutils, options]
 
@@ -130,68 +130,116 @@ when defined(macosx) and not defined(ios):
     return none(string)
 
 elif defined(linux) and not defined(android) and not defined(emscripten):
-  import oldgtk3/[gtk, glib]
+  # Thin GTK4 C bindings — no Nim wrapper dependency.
+  # Uses GtkFileChooserNative with a local GMainLoop (gtk_dialog_run was removed in GTK4).
 
-  proc initCheckWithArgv*(): bool {.inline.} =
-    var
-      cmdLine{.importc.}: cstringArray
-      cmdCount{.importc.}: cint
-    gtk.initCheck(cmdCount, cmdLine).bool
+  const gtk4Cflags {.strdefine.} = staticExec("pkg-config --cflags gtk4").strip
+  const gtk4Libs  {.strdefine.} = staticExec("pkg-config --libs gtk4").strip
+
+  {.passC: gtk4Cflags.}
+  {.passL: gtk4Libs.}
+
+  {.emit: """
+  #include <gtk/gtk.h>
+
+  typedef struct {
+    GtkFileChooserNative *dialog;
+    gchar *result;
+    gint response;
+    GMainLoop *loop;
+  } DriftDialogData;
+
+  static void drift_on_dialog_response(GtkNativeDialog *dialog, gint response_id, DriftDialogData *data) {
+    data->response = response_id;
+    if (response_id == GTK_RESPONSE_ACCEPT) {
+      GFile *file = gtk_file_chooser_get_file(GTK_FILE_CHOOSER(dialog));
+      if (file) {
+        data->result = g_file_get_path(file);
+        g_object_unref(file);
+      }
+    }
+    g_main_loop_quit(data->loop);
+  }
+
+  static gchar *drift_gtk4_file_dialog(gint kind, const gchar *title, const gchar *folder,
+                                        const gchar **filter_names, const gchar **filter_patterns, gsize filter_count) {
+    GtkFileChooserAction action;
+    const gchar *accept_label;
+    switch (kind) {
+      case 1: action = GTK_FILE_CHOOSER_ACTION_SAVE;   accept_label = "Save";   break;
+      case 2: action = GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER; accept_label = "Select"; break;
+      default: action = GTK_FILE_CHOOSER_ACTION_OPEN;  accept_label = "Open";   break;
+    }
+
+    GtkFileChooserNative *dialog = gtk_file_chooser_native_new(title, NULL, action, accept_label, "Cancel");
+
+    if (folder && folder[0]) {
+      GFile *f = g_file_new_for_path(folder);
+      gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), f);
+      g_object_unref(f);
+    }
+
+    if (filter_count > 0) {
+      GtkFileFilter *all = gtk_file_filter_new();
+      gtk_file_filter_set_name(all, "All");
+      for (gsize i = 0; i < filter_count; i++) {
+        GtkFileFilter *f = gtk_file_filter_new();
+        gtk_file_filter_add_pattern(f, filter_patterns[i]);
+        gtk_file_filter_set_name(f, filter_names[i]);
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), f);
+        gtk_file_filter_add_pattern(all, filter_patterns[i]);
+      }
+      gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), all);
+    }
+
+    DriftDialogData data = {0};
+    data.dialog = dialog;
+    data.loop = g_main_loop_new(NULL, FALSE);
+
+    g_signal_connect(dialog, "response", G_CALLBACK(drift_on_dialog_response), &data);
+    gtk_native_dialog_show(GTK_NATIVE_DIALOG(dialog));
+    g_main_loop_run(data.loop);
+
+    g_main_loop_unref(data.loop);
+    g_object_unref(dialog);
+
+    return data.result; /* caller must g_free() */
+  }
+  """.}
+
+  proc g_free(p: pointer) {.importc, nodecl, cdecl.}
+  proc drift_gtk4_file_dialog(kind: cint; title, folder: cstring;
+                              filterNames, filterPatterns: ptr cstring;
+                              filterCount: csize_t): cstring
+    {.importc, nodecl, cdecl.}
 
   proc show*(di: DialogInfo): Option[string] =
-    discard initCheckWithArgv()
+    var filterNames: seq[cstring]
+    var filterPatterns: seq[cstring]
+    for f in di.filters:
+      filterNames.add(f.name.cstring)
+      filterPatterns.add(f.ext.cstring)
 
-    var action: FileChooserAction
-    var buttons = newSeq[tuple[title: string, rType: ResponseType]](2)
-    buttons[0] = (title: "Cancel", rType: ResponseType.CANCEL)
-    buttons[1] = (title: "Open", rType: ResponseType.ACCEPT)
+    let kind = case di.kind:
+      of dkSaveFile: 1.cint
+      of dkSelectFolder: 2.cint
+      else: 0.cint
 
-    case di.kind:
-    of dkOpenFile:
-      action = FileChooserAction.OPEN
-    of dkSaveFile:
-      action = FileChooserAction.SAVE
-      buttons[1].title = "Save"
-    of dkSelectFolder:
-      action = FileChooserAction.SELECT_FOLDER
-      buttons[1].title = "Select"
+    let cRes = drift_gtk4_file_dialog(
+      kind,
+      di.title.cstring,
+      di.folder.cstring,
+      (if filterNames.len > 0: filterNames[0].unsafeAddr else: nil),
+      (if filterPatterns.len > 0: filterPatterns[0].unsafeAddr else: nil),
+      filterNames.len.csize_t
+    )
 
-    var dialog = newFileChooserDialog(di.title.cstring, nil, action, nil)
-    for button in buttons:
-      discard dialog.add_button(button.title, button.rType.cint)
-
-    if di.folder.len > 0:
-      discard cast[FileChooser](dialog).setCurrentFolder(di.folder.cstring)
-
-    if di.filters.len > 0:
-      var filters = newSeq[FileFilter]()
-      let all = newFileFilter()
-      all.setName("All")
-      filters.add(all)
-      for fi in di.filters:
-        let pfi = newFileFilter()
-        pfi.addPattern(fi.ext.cstring)
-        all.addPattern(fi.ext.cstring)
-        pfi.setName(fi.name.cstring)
-        filters.add(pfi)
-
-      for fi in filters:
-        cast[FileChooser](dialog).addFilter(fi)
-
-    let res = dialog.run()
-    if cast[ResponseType](res) in [ResponseType.ACCEPT, ResponseType.YES, ResponseType.APPLY]:
-      let fileChooser = cast[FileChooser](pointer(dialog))
-      result = some($fileChooser.getFilename())
-      var path = result.get()
+    if not cRes.isNil:
+      var path = $cRes
+      g_free(cRes)
       di.checkExtensionOnSave(path)
-      result = some(path)
-    else:
-      result = none(string)
-
-    dialog.destroy()
-
-    while events_pending():
-      discard main_iteration()
+      return some(path)
+    return none(string)
 
 elif defined(windows):
   import std/[winlean, sequtils]
