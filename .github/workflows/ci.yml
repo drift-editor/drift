@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v1
+        with:
+          nim-version: '2.2.8'
+
+      - name: Nim version
+        run: nim --version
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y pkg-config libgtk-4-dev libglib2.0-dev libpango1.0-dev libcairo2-dev libfontconfig1-dev libx11-dev libxft-dev libsdl2-dev libsdl2-ttf-dev
+
+      - name: Install dependencies
+        run: nimble install -d -y
+
+      - name: Build
+        run: nim c -o:drift src/drift.nim

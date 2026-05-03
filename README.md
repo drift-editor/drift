@@ -1,4 +1,4 @@
-# Drift Editor
+# Drift Editor ![CI](https://github.com/drift-editor/drift/workflows/CI/badge.svg)
 
 > **⚠️ Under active development.** Expect breaking changes and incomplete features.
 >
@@ -6,7 +6,7 @@
 >
 > This project synthesizes ideas and code from **three previous editor explorations**, developed through collaborative vibe coding.
 
-A lightweight IDE/text editor written in Nim, built on [uirelays](https://github.com/nim-works/uirelays).
+A lightweight IDE/text editor written in Nim, built on [uirelays](https://github.com/nim-lang/uirelays).
 
 ![Drift Editor Screenshot](./Screenshot.png)
 
@@ -87,7 +87,7 @@ See [notes/ARCHITECTURE.md](notes/ARCHITECTURE.md) for the full architecture ove
 
 ### Prerequisites
 - Nim 2.2+
-- [uirelays](https://github.com/nim-works/uirelays)
+- [uirelays](https://github.com/nim-lang/uirelays)
 
 ### Build
 ```bash

@@ -14,6 +14,7 @@ nimcache
 *.ilk
 .*
 !.gitignore
+!.github/
 *.dll
 __pycache__
 bindings/generated
