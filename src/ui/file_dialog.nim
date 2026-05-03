@@ -304,12 +304,12 @@ elif defined(windows):
       di.title.cstring,
       di.folder.cstring,
       filterStr.cstring,
-      if di.extension.len > 0: di.extension.cstring else: nil
+      if di.extension.len > 0: di.extension.cstring else: cast[cstring](nil)
     )
 
     if not cRes.isNil:
       var path = $cRes
-      free(cRes)
+      free(cast[pointer](cRes))
       di.checkExtensionOnSave(path)
       return some(path)
     return none(string)
