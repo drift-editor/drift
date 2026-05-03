@@ -242,10 +242,41 @@ elif defined(linux) and not defined(android) and not defined(emscripten):
     return none(string)
 
 elif defined(windows):
-  {.compile: "win_file_dialog.c".}
+  # Pure Nim struct — no importc, no windows.h include.
+  # Layout matches OPENFILENAMEA on x86 and x64 Windows.
+  type
+    OPENFILENAMEA = object
+      lStructSize: int32
+      hwndOwner: uint
+      hInstance: uint
+      lpstrFilter: uint
+      lpstrCustomFilter: uint
+      nMaxCustFilter: int32
+      nFilterIndex: int32
+      lpstrFile: uint
+      nMaxFile: int32
+      lpstrFileTitle: uint
+      nMaxFileTitle: int32
+      lpstrInitialDir: uint
+      lpstrTitle: uint
+      Flags: int32
+      nFileOffset: uint16
+      nFileExtension: uint16
+      lpstrDefExt: uint
+      lCustData: uint
+      lpfnHook: uint
+      lpTemplateName: uint
 
-  proc drift_win_file_dialog(kind: int32; title, folder, filter, defExt: cstring): cstring {.importc, cdecl.}
-  proc free(p: pointer) {.importc: "free", header: "<stdlib.h>".}
+  const
+    OFN_HIDEREADONLY = 0x00000004
+    OFN_PATHMUSTEXIST = 0x00000800
+    OFN_FILEMUSTEXIST = 0x00001000
+    OFN_OVERWRITEPROMPT = 0x00000002
+    OFN_NOCHANGEDIR = 0x00000008
+    MAX_PATH = 260
+
+  proc GetOpenFileNameA(lpofn: ptr OPENFILENAMEA): int32 {.stdcall, dynlib: "comdlg32.dll", importc.}
+  proc GetSaveFileNameA(lpofn: ptr OPENFILENAMEA): int32 {.stdcall, dynlib: "comdlg32.dll", importc.}
 
   proc buildFilterString(filters: seq[DialogFilter]): string =
     if filters.len == 0:
@@ -262,20 +293,43 @@ elif defined(windows):
     if di.kind == dkSelectFolder:
       return none(string)
 
-    let filterStr = buildFilterString(di.filters)
-    let cRes = drift_win_file_dialog(
-      (if di.kind == dkSaveFile: 1 else: 0).int32,
-      di.title.cstring,
-      di.folder.cstring,
-      filterStr.cstring,
-      if di.extension.len > 0: di.extension.cstring else: cast[cstring](nil)
-    )
+    var ofn = cast[ptr OPENFILENAMEA](alloc0(sizeof(OPENFILENAMEA)))
+    ofn.lStructSize = sizeof(OPENFILENAMEA).int32
+    ofn.Flags = OFN_HIDEREADONLY or OFN_PATHMUSTEXIST or OFN_NOCHANGEDIR
 
-    if not cRes.isNil:
-      var path = $cRes
-      free(cast[pointer](cRes))
+    var buffer = newString(MAX_PATH)
+    ofn.lpstrFile = cast[uint](cast[pointer](buffer.cstring))
+    ofn.nMaxFile = MAX_PATH.int32
+
+    let filterStr = buildFilterString(di.filters)
+    ofn.lpstrFilter = cast[uint](cast[pointer](filterStr.cstring))
+    ofn.lpstrTitle = cast[uint](cast[pointer](di.title.cstring))
+    ofn.lpstrInitialDir = if di.folder.len > 0:
+      cast[uint](cast[pointer](di.folder.cstring)) else: 0'u
+
+    var success: int32
+    case di.kind:
+    of dkOpenFile:
+      ofn.Flags = ofn.Flags or OFN_FILEMUSTEXIST
+      success = GetOpenFileNameA(ofn)
+    of dkSaveFile:
+      ofn.Flags = ofn.Flags or OFN_OVERWRITEPROMPT
+      ofn.lpstrDefExt = if di.extension.len > 0:
+        cast[uint](cast[pointer](di.extension.cstring)) else: 0'u
+      success = GetSaveFileNameA(ofn)
+    else:
+      dealloc(ofn)
+      return none(string)
+
+    if success != 0:
+      var path = $cast[cstring](cast[pointer](ofn.lpstrFile))
+      let nullPos = path.find('\0')
+      if nullPos >= 0:
+        path = path[0..<nullPos]
       di.checkExtensionOnSave(path)
+      dealloc(ofn)
       return some(path)
+    dealloc(ofn)
     return none(string)
 
 else:
