@@ -7,7 +7,7 @@ from pixie import readImage
 import widgets/[synedit, terminal]
 import ../ui/[tabs, command_palette, search_panel, notification, dialog, context_menu, file_explorer, git_panel, welcome_screen, theme, hover_tooltip, file_dialog, statusbar, icons, theme_loader, theme_selector, location_picker, node, diagnostics_panel, ai_panel, debug_panel, debug_sidebar]
 import explorer_context
-import ../services/[lsp_thread, ai_thread]
+import ../services/[lsp_thread, lsp_client, ai_thread]
 import ../services/dap_thread
 import ../services/git as gitcmd
 import ../core/types
@@ -709,14 +709,12 @@ proc switchBuffer(app: App, idx: int) =
 proc closeBuffer(app: App, idx: int) =
   if idx < 0 or idx >= app.buffers.len:
     return
-  
-  # Remove diagnostics for this buffer from the panel
+
+  # Notify LSP that the document is closed (keeps diagnostics in panel
+  # for the user to browse even after the file is closed).
   let closedPath = app.buffers[idx].path
-  if closedPath.len > 0:
-    var uri = closedPath
-    if not uri.startsWith("file://"):
-      uri = "file://" & uri
-    app.diagPanel.update(uri, @[])
+  if closedPath.len > 0 and app.lspThread != nil and app.lspThread.isReady:
+    app.lspThread.notifyDidClose(closedPath)
   
   # Note: uirelays backends do not implement freeImage (drawRelays.freeImage
   # is nil), so we skip it to avoid SIGSEGV. Images are small and released
@@ -865,13 +863,10 @@ proc handleDiagnostics(app: App; msg: JsonNode) =
   let uri = params["uri"].getStr()
   let diagCount = if params["diagnostics"].kind == JArray: params["diagnostics"].len else: 0
   stderr.writeLine("[app] handleDiagnostics: uri=" & uri & " count=" & $diagCount)
-  
+
   # Normalize URI for comparison (remove file:// prefix and decode)
-  var normalizedUri = uri
-  if normalizedUri.startsWith("file://"):
-    normalizedUri = normalizedUri[7..^1]
-  normalizedUri = normalizedUri.replace("%20", " ")
-  
+  let normalizedUri = decodeFileUri(uri)
+
   # Find if this file is open in any buffer
   var targetIdx = -1
   for i, b in app.buffers:
@@ -880,26 +875,15 @@ proc handleDiagnostics(app: App; msg: JsonNode) =
       stderr.writeLine("[app] handleDiagnostics: matched buffer " & $i & " path=" & b.path)
       break
 
-  # Only process diagnostics for files that are open in this editor
-  if targetIdx < 0:
-    stderr.writeLine("[app] handleDiagnostics: ignoring diagnostics for unopened file: " & normalizedUri)
-    # Remove from panel if it was previously open
-    app.diagPanel.update(uri, @[])
-    return
-
-  var diagMarkers: seq[tuple[a, b: int, color: screen.Color]] = @[]
-  var diagLines: seq[int] = @[]
+  # Parse all diagnostic entries (always do this, even for closed files)
   var parsedEntries: seq[DiagnosticEntry] = @[]
   let diagnostics = params["diagnostics"]
   if diagnostics.kind == JArray:
-    let text = app.buffers[targetIdx].ed.fullText()
     for diag in diagnostics:
       if not diag.hasKey("range"): continue
       let range = diag["range"]
       let startLine = range["start"]["line"].getInt()
       let startChar = range["start"]["character"].getInt()
-      let endLine = range["end"]["line"].getInt()
-      let endChar = range["end"]["character"].getInt()
       let severity = if diag.hasKey("severity"): diag["severity"].getInt() else: SeverityError
       let message  = if diag.hasKey("message"): diag["message"].getStr() else: ""
       let source   = if diag.hasKey("source"): diag["source"].getStr() else: ""
@@ -911,18 +895,42 @@ proc handleDiagnostics(app: App; msg: JsonNode) =
         line:     startLine,
         col:      startChar
       ))
-      diagLines.add(startLine)
-      let a = offsetAtPos(text, startLine, startChar)
-      let b = max(a, offsetAtPos(text, endLine, endChar) - 1)
-      diagMarkers.add((a, b, color(243, 139, 168, 80)))
 
-  # Update diagnostics panel store (Req 1.1, 1.2, 1.3)
+  # Always update the diagnostics panel store so users can browse all project
+  # diagnostics, even for files that aren't currently open.
   app.diagPanel.update(uri, parsedEntries)
 
-  app.lastDiagLines[targetIdx] = diagLines
-  app.bufferMarkers[targetIdx].setMarkers(msDiagnostic, diagMarkers)
-  applyMarkers(app.buffers[targetIdx].ed, app.bufferMarkers[targetIdx])
-  applyLineDecorations(app, targetIdx)
+  # Apply markers only for open buffers
+  if targetIdx >= 0:
+    let text = app.buffers[targetIdx].ed.fullText()
+    # Precompute line-start offsets to avoid O(lines) scans per diagnostic
+    var lineStarts = @[0]
+    for i, ch in text:
+      if ch == '\n':
+        lineStarts.add(i + 1)
+    proc offsetFast(ls: seq[int]; line, col: int): int =
+      if line < ls.len: ls[line] + col
+      else: ls[^1] + col
+
+    var diagMarkers: seq[tuple[a, b: int, color: screen.Color]] = @[]
+    var diagLines: seq[int] = @[]
+    if diagnostics.kind == JArray:
+      for diag in diagnostics:
+        if not diag.hasKey("range"): continue
+        let range = diag["range"]
+        let startLine = range["start"]["line"].getInt()
+        let startChar = range["start"]["character"].getInt()
+        let endLine = range["end"]["line"].getInt()
+        let endChar = range["end"]["character"].getInt()
+        let a = offsetFast(lineStarts, startLine, startChar)
+        let b = max(a, offsetFast(lineStarts, endLine, endChar) - 1)
+        diagMarkers.add((a, b, color(243, 139, 168, 80)))
+        diagLines.add(startLine)
+
+    app.lastDiagLines[targetIdx] = diagLines
+    app.bufferMarkers[targetIdx].setMarkers(msDiagnostic, diagMarkers)
+    applyMarkers(app.buffers[targetIdx].ed, app.bufferMarkers[targetIdx])
+    applyLineDecorations(app, targetIdx)
 
 proc isBinaryFile(path: string): bool =
   if not fileExists(path):
@@ -1177,15 +1185,13 @@ proc init*(app: App) =
   # Diagnostics panel
   app.diagPanel = newDiagnosticsPanel()
   app.diagPanel.onNavigate = proc(uri: string; line, col: int) =
-    var path = uri
-    if path.startsWith("file://"):
-      path = path[7..^1]
+    let path = decodeFileUri(uri)
     let idx = app.openBuffer(path)
     if idx < 0:
       discard app.notificationManager.error("Cannot open file: " & path.extractFilename)
     else:
       if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
-        app.buffers[app.currentBuffer].ed.gotoLine(line, col)
+        app.buffers[app.currentBuffer].ed.gotoLine(line, col)  ## col is 0-based from LSP
 
   # Debug panel
   app.debugPanel = newDebugPanel()
@@ -2024,19 +2030,27 @@ proc run*(app: App) =
 
     # Poll LSP responses
     if app.lspThread != nil:
+      var responses: seq[LSPMessage] = @[]
       while true:
         let respOpt = app.lspThread.getResponse()
         if respOpt.isNone:
           break
-        let resp = respOpt.get()
-        stderr.writeLine("[app] LSP response: " & $resp.kind)
-        case resp.kind
-        of lmkReady:
+        responses.add(respOpt.get())
+      # Process lmkReady first so didOpen fires before any pending diagnostics
+      var pending: seq[LSPMessage] = @[]
+      for resp in responses:
+        if resp.kind == lmkReady:
           app.lspStarting = false
           stderr.writeLine("[app] LSP ready, notifying didOpen for all open .nim buffers")
           for b in app.buffers:
             if b.path.endsWith(".nim"):
               app.lspThread.notifyDidOpen(b.path, b.ed.fullText())
+        else:
+          pending.add(resp)
+      for resp in pending:
+        stderr.writeLine("[app] LSP response: " & $resp.kind)
+        case resp.kind
+        of lmkReady: discard  # already handled above
         of lmkError:
           app.lspStarting = false
           stderr.writeLine("[app] LSP error: " & resp.str1)
@@ -2072,9 +2086,9 @@ proc run*(app: App) =
             stderr.writeLine("[app]   loc[" & $i & "] uri=" & loc.uri)
           app.showLocationPicker(resp.locations)
         of lmkDiagnostics:
-          stderr.writeLine("[app] lmkDiagnostics received, len=" & $resp.str1.len)
+          stderr.writeLine("[app] lmkDiagnostics received")
           try:
-            app.handleDiagnostics(parseJson(resp.str1))
+            app.handleDiagnostics(resp.jsonData)
           except CatchableError as e:
             stderr.writeLine("[app] handleDiagnostics error: " & e.msg)
         of lmkShowMessage:

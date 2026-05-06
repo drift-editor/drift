@@ -280,14 +280,44 @@ proc stopLSP*(client: LSPClient) {.async.} =
 # Helpers
 
 proc toFileUri*(path: string): string =
+  ## Percent-encode path characters per RFC 3986 unreserved set.
+  ## Unreserved: A-Z a-z 0-9 - _ . ~ / (and : for Windows drive letters).
   var p = path.replace('\\', '/')
-  p = p.replace(" ", "%20")
+  var encoded = ""
+  for c in p:
+    case c
+    of 'A'..'Z', 'a'..'z', '0'..'9', '-', '_', '.', '~', '/':
+      encoded.add(c)
+    of ':':
+      # Keep colons for Windows drive letters (C:/...) but encode elsewhere
+      when defined(windows):
+        if encoded.len == 1 and p[0] in {'A'..'Z', 'a'..'z'}:
+          encoded.add(c)
+        else:
+          encoded.add('%' & toHex(ord(c), 2).toUpperAscii())
+      else:
+        encoded.add('%' & toHex(ord(c), 2).toUpperAscii())
+    else:
+      encoded.add('%' & toHex(ord(c), 2).toUpperAscii())
   when defined(windows):
-    if p.len > 0 and p[1] == ':':
-      p = "/" & p
-    result = "file://" & p
+    if encoded.len > 0 and encoded[1] == ':':
+      result = "file:///" & encoded
+    else:
+      result = "file://" & encoded
   else:
-    result = "file://" & p
+    result = "file://" & encoded
+
+proc decodeFileUri*(uri: string): string =
+  ## Strip file:// prefix and decode percent-encoded characters.
+  if uri.startsWith("file://"):
+    result = uri[7..^1]
+  else:
+    result = uri
+  # Decode common percent-encoded characters
+  result = result.replace("%20", " ")
+  result = result.replace("%23", "#")
+  result = result.replace("%25", "%")
+  result = result.replace("%3F", "?")
 
 proc isReady*(client: LSPClient): bool =
   client != nil and client.state == lspReady
@@ -356,6 +386,15 @@ proc didChange*(client: LSPClient; path, content: string) {.async.} =
     ]
   }
   await client.sendNotification("textDocument/didChange", params)
+
+proc didClose*(client: LSPClient; path: string) {.async.} =
+  if not client.isReady: return
+  let uri = toFileUri(path)
+  client.documentVersions.del(uri)
+  let params = %*{
+    "textDocument": { "uri": uri }
+  }
+  await client.sendNotification("textDocument/didClose", params)
 
 # Hover
 

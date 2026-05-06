@@ -1,4 +1,4 @@
-import std/[options, json, os]
+import std/[options, json, os, monotimes, tables]
 import ../channel_spsc
 import chronos
 import lsp_client
@@ -10,6 +10,7 @@ type
     lmkDefinition
     lmkDidOpen
     lmkDidChange
+    lmkDidClose
     lmkCancelHover
     lmkShutdown
     lmkDiagnostics
@@ -45,8 +46,12 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
     let initOptions = if initialMsg.jsonData != nil: initialMsg.jsonData else: newJObject()
     stderr.writeLine("[lsp-thread] starting server: " & serverName)
     var client: LSPClient = nil
-    var diagBuffer: seq[string] = @[]
+    const MaxBufferSize = 200
+    var diagBuffer: seq[JsonNode] = @[]
     var msgBuffer: seq[tuple[msg: string, msgType: int]] = @[]
+    var lastDidChangeTime: Table[string, int64] = initTable[string, int64]()
+    const DidChangeDebounceMs = 150
+    template nowMs(): int64 = getMonoTime().ticks div 1_000_000
 
     proc runEventLoop() {.async.} =
       try:
@@ -57,9 +62,13 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
             let uri = if j.hasKey("params") and j["params"].hasKey("uri"): j["params"]["uri"].getStr() else: "?"
             let cnt = if j.hasKey("params") and j["params"].hasKey("diagnostics"): j["params"]["diagnostics"].len else: 0
             stderr.writeLine("[lsp-thread] diagnostics callback fired: uri=" & uri & " count=" & $cnt)
-            diagBuffer.add($j)
+            if diagBuffer.len >= MaxBufferSize:
+              diagBuffer.delete(0)
+            diagBuffer.add(j)
           )
           client.setShowMessageCallback(proc(m: string, mt: int) =
+            if msgBuffer.len >= MaxBufferSize:
+              msgBuffer.delete(0)
             msgBuffer.add((m, mt))
           )
           client.ensureReadLoop()
@@ -106,7 +115,15 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
             of lmkCancelHover: hasCancel = true
             of lmkShutdown: running = false
             of lmkDidOpen: asyncSpawn didOpen(client, m.str1, m.str2)
-            of lmkDidChange: asyncSpawn didChange(client, m.str1, m.str2)
+            of lmkDidChange:
+              let now = nowMs()
+              if not lastDidChangeTime.hasKey(m.str1) or
+                 now - lastDidChangeTime[m.str1] >= DidChangeDebounceMs:
+                lastDidChangeTime[m.str1] = now
+                asyncSpawn didChange(client, m.str1, m.str2)
+            of lmkDidClose:
+              lastDidChangeTime.del(m.str1)
+              asyncSpawn didClose(client, m.str1)
             else: discard
 
           if running and hasCancel:
@@ -159,7 +176,7 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
           diagBuffer = @[]
           msgBuffer = @[]
           for d in diags:
-            t.sendResponse(LSPMessage(kind: lmkDiagnostics, str1: d))
+            t.sendResponse(LSPMessage(kind: lmkDiagnostics, jsonData: d))
           for m in msgs:
             t.sendResponse(LSPMessage(kind: lmkShowMessage, str1: m.msg, int1: m.msgType))
 
@@ -207,6 +224,9 @@ proc notifyDidOpen*(t: LSPThread; path, content: string) =
 
 proc notifyDidChange*(t: LSPThread; path, content: string) =
   t.queueRequest(LSPMessage(kind: lmkDidChange, str1: path, str2: content))
+
+proc notifyDidClose*(t: LSPThread; path: string) =
+  t.queueRequest(LSPMessage(kind: lmkDidClose, str1: path))
 
 proc cancelHover*(t: LSPThread) =
   t.queueRequest(LSPMessage(kind: lmkCancelHover))

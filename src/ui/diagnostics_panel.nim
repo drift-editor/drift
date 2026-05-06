@@ -30,12 +30,20 @@ type
   DiagnosticStore* = object
     data*: Table[string, seq[DiagnosticEntry]]
 
+  RowKind = enum rkGroup, rkEntry
+  Row = object
+    kind:  RowKind
+    uri:   string
+    entry: DiagnosticEntry  ## only valid for rkEntry
+
   DiagnosticsPanel* = ref object
     store*:           DiagnosticStore
     scrollOffset*:    int
     collapsedGroups*: HashSet[string]
     hoverRow*:        int  ## flat row index into the rendered list; -1 = none
-    onNavigate*:      proc(uri: string; line, col: int)
+    onNavigate*:      proc(uri: string; line, col: int)  ## col is 0-based per LSP
+    cachedRows:       seq[Row]
+    rowsDirty:        bool
 
 # Store
 
@@ -43,6 +51,9 @@ proc update*(store: var DiagnosticStore; uri: string; entries: seq[DiagnosticEnt
   ## Replace entries for uri. Deletes the key when entries is empty.
   if entries.len == 0: store.data.del(uri)
   else: store.data[uri] = entries
+
+proc dirty*(panel: DiagnosticsPanel) =
+  panel.rowsDirty = true
 
 proc errorCount*(store: DiagnosticStore): int =
   for entries in store.data.values:
@@ -62,11 +73,14 @@ proc newDiagnosticsPanel*(): DiagnosticsPanel =
     scrollOffset:    0,
     collapsedGroups: initHashSet[string](),
     hoverRow:        -1,
-    onNavigate:      nil
+    onNavigate:      nil,
+    cachedRows:      @[],
+    rowsDirty:        true
   )
 
 proc update*(panel: DiagnosticsPanel; uri: string; entries: seq[DiagnosticEntry]) =
   panel.store.update(uri, entries)
+  panel.dirty()
 
 # Helpers
 
@@ -107,19 +121,16 @@ proc sortedEntries(entries: seq[DiagnosticEntry]): seq[DiagnosticEntry] =
 
 # Row list
 
-type
-  RowKind = enum rkGroup, rkEntry
-  Row = object
-    kind:  RowKind
-    uri:   string
-    entry: DiagnosticEntry  ## only valid for rkEntry
-
 proc buildRows(panel: DiagnosticsPanel): seq[Row] =
+  if not panel.rowsDirty and panel.cachedRows.len > 0:
+    return panel.cachedRows
   for uri in sortedUris(panel.store):
     result.add(Row(kind: rkGroup, uri: uri))
     if uri notin panel.collapsedGroups:
       for e in sortedEntries(panel.store.data[uri]):
         result.add(Row(kind: rkEntry, uri: uri, entry: e))
+  panel.cachedRows = result
+  panel.rowsDirty = false
 
 # Render
 
@@ -256,6 +267,7 @@ proc handleMouse*(panel: DiagnosticsPanel; e: Event; bounds: Rect): bool =
     if r.kind == rkGroup:
       if r.uri in panel.collapsedGroups: panel.collapsedGroups.excl(r.uri)
       else: panel.collapsedGroups.incl(r.uri)
+      panel.dirty()
     else:
       if panel.onNavigate != nil:
         panel.onNavigate(r.entry.uri, r.entry.line, r.entry.col)
