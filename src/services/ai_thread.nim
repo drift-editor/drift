@@ -3,7 +3,9 @@
 ## ACP is JSON-RPC 2.0 over stdio.
 
 import std/[options, json, os, osproc, strutils, streams]
-when defined(posix):
+when defined(windows):
+  import std/winlean
+else:
   import std/posix
 import ../channel_spsc
 import git as gitcmd
@@ -40,37 +42,39 @@ proc sendResponse(t: AIThread, msg: AIMessage) {.inline.} =
   while not channel_spsc.trySend(t.respChan, msg):
     if t.respChan.isClosed: return
     if retries < 100:
-      sleep(1)  # 1ms backoff
+      sleep(1)
       inc retries
     else:
       stderr.writeLine("[ai-thread] WARNING: dropped response, channel full after 100ms")
       break
 
-when defined(posix):
-  proc setNonBlocking(fd: FileHandle) =
-    let fd32 = fd.int32
-    var flags = fcntl(fd32, F_GETFL, 0)
-    discard fcntl(fd32, F_SETFL, flags or O_NONBLOCK)
+proc blockingRead(fd: FileHandle): string =
+  var buf: array[4096, char]
+  when defined(windows):
+    var bytesRead: DWORD
+    if ReadFile(fd, addr buf[0], 4096.DWORD, addr bytesRead, nil).bool and bytesRead > 0:
+      result = newString(bytesRead.int)
+      copyMem(addr result[0], addr buf[0], bytesRead.int)
+  else:
+    let n = posix.read(fd.int32, addr buf[0], 4096)
+    if n > 0:
+      result = newString(n)
+      copyMem(addr result[0], addr buf[0], n)
 
-  proc readAvailable(fd: FileHandle): string =
-    var buf: array[4096, char]
-    result = ""
-    while true:
-      let n = posix.read(fd.int32, addr buf[0], 4096)
-      if n > 0:
-        var s = newString(n)
-        copyMem(addr s[0], addr buf[0], n)
-        result.add(s)
-      elif n < 0 and (errno == EAGAIN or errno == EWOULDBLOCK):
-        break
-      else:
-        break
-else:
-  proc setNonBlocking(fd: FileHandle) =
-    discard  # TODO: Windows non-blocking pipe
+type
+  ReaderThreadArgs = object
+    fd: FileHandle
+    chan: SPSChannel[string]
 
-  proc readAvailable(fd: FileHandle): string =
-    result = ""  # TODO: Windows non-blocking pipe read
+proc readerProc(args: ReaderThreadArgs) {.thread.} =
+  while true:
+    let data = blockingRead(args.fd)
+    while not channel_spsc.trySend(args.chan, data):
+      if args.chan.isClosed:
+        return
+      sleep(1)
+    if data.len == 0:
+      break
 
 proc sendJsonRpc(p: Process, id: int, rpcMethod: string, params: JsonNode): int =
   let msg = %*{"jsonrpc": "2.0", "id": id, "method": rpcMethod, "params": params}
@@ -177,12 +181,10 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
       sendJsonRpcResponse(p, reqId, %*{"diff": diff})
 
   of "session/request_permission":
-    # Require explicit user approval for dangerous operations
     let permType = params{"permissionType"}.getStr("")
     let isWrite = permType.contains("write") or permType.contains("edit") or permType.contains("modify")
     let isExec = permType.contains("execute") or permType.contains("run") or permType.contains("shell")
     if isWrite or isExec:
-      # Deny write/execute permissions automatically — user must use editor directly
       sendJsonRpcResponse(p, reqId, %*{
         "outcome": {
           "outcome": "selected",
@@ -211,6 +213,80 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
     stderr.writeLine("[ai-thread] unhandled agent request: " & rpcMethod)
     sendJsonRpcError(p, reqId, -32601, "Method not found: " & rpcMethod)
 
+# ---------------------------------------------------------------------------
+#  Templates / helpers shared by init, session creation, and the main loop
+# ---------------------------------------------------------------------------
+
+template drainReader(chan: SPSChannel[string], buf: var string, body: untyped) =
+  ## Read everything currently waiting on ``chan``, split into lines, and
+  ## execute ``body`` for each complete line (``j`` is injected as the parsed
+  ## JsonNode).
+  var data: string
+  while channel_spsc.tryReceive(chan, data):
+    if data.len == 0: continue
+    buf &= data
+    var lines = buf.split('\n')
+    buf = lines.pop()
+    for line in lines:
+      if line.len == 0: continue
+      try:
+        let j {.inject.} = parseJson(line)
+        body
+      except CatchableError as e:
+        stderr.writeLine("[ai-thread] parse error: " & e.msg & " | line: " & line[0..min(80, line.len-1)])
+
+proc handleAgentJson(t: AIThread, p: Process, j: JsonNode,
+                     sessionId: var string, sessionDone: var bool,
+                     pendingTurnId: var int, cancelled: bool) =
+  ## Dispatch JSON-RPC messages that arrive during the main conversation loop.
+  if j.hasKey("result") and j.hasKey("id"):
+    if not sessionDone and j["result"].hasKey("sessionId"):
+      sessionId = j["result"]["sessionId"].getStr()
+      sessionDone = true
+    elif j["id"].getInt() == pendingTurnId:
+      pendingTurnId = -1
+      if not cancelled:
+        t.sendResponse(AIMessage(kind: amkResponseDone))
+  elif j.hasKey("error") and j.hasKey("id"):
+    if j["id"].getInt() == pendingTurnId:
+      pendingTurnId = -1
+      if not cancelled:
+        t.sendResponse(AIMessage(kind: amkError, error: j["error"]["message"].getStr()))
+  elif j.hasKey("method") and j.hasKey("id"):
+    t.handleAgentRequest(p, j)
+  elif j.hasKey("method") and not j.hasKey("id"):
+    let rpcMethod = j["method"].getStr()
+    if rpcMethod == "session/update":
+      let update = j["params"]["update"]
+      let updateType = update["sessionUpdate"].getStr()
+      case updateType
+      of "agent_message_chunk":
+        if not cancelled:
+          t.sendResponse(AIMessage(kind: amkResponseChunk, text: update["content"].getStr()))
+      of "agent_thought_chunk":
+        if not cancelled:
+          var text = ""
+          let contentNode = update["content"]
+          if contentNode.kind == JString:
+            text = contentNode.getStr()
+          elif contentNode.kind == JObject:
+            for key in ["text", "thought", "reasoning", "content", "message"]:
+              if contentNode.hasKey(key) and contentNode[key].kind == JString:
+                text = contentNode[key].getStr()
+                break
+          if text.len > 0:
+            t.sendResponse(AIMessage(kind: amkThinking, text: text))
+      of "tool_call_start":
+        stderr.writeLine("[ai-thread] tool_call_start")
+      of "tool_call_progress":
+        discard
+      else:
+        discard
+
+# ---------------------------------------------------------------------------
+#  Main thread procedure
+# ---------------------------------------------------------------------------
+
 proc aiThreadProc(t: AIThread) {.thread.} =
   var p: Process
   try:
@@ -220,50 +296,43 @@ proc aiThreadProc(t: AIThread) {.thread.} =
     return
 
   let outFd = outputHandle(p)
-  when defined(posix):
-    setNonBlocking(outFd)
+  var readerChan = newSPSChannel[string](1024)
+  var readerThread: Thread[ReaderThreadArgs]
+  createThread(readerThread, readerProc, ReaderThreadArgs(fd: outFd, chan: readerChan))
+
+  var nextId = 1
+  var lineBuffer = ""
+  var sessionId = ""
+  var sessionDone = false
+  var pendingTurnId = -1
+  var cancelled = false
+
+  template bail(msg: string) =
+    t.sendResponse(AIMessage(kind: amkError, error: msg))
+    readerChan.close()
+    joinThread(readerThread)
+    return
+
+  template checkDead: bool = peekExitCode(p) != -1
 
   # --- Initialize ---
-  var nextId = 1
   nextId = sendJsonRpc(p, nextId, "initialize", %*{
     "protocolVersion": 1,
     "clientInfo": {"name": "drift", "version": "0.1"}
   })
 
   var initDone = false
-  var sessionId = ""
-  var lineBuffer = ""
-  var initRetries = 0
-
   while not initDone:
-    sleep(10)
-    inc initRetries
-    if initRetries > 500:  # 5 second timeout
-      t.sendResponse(AIMessage(kind: amkError, error: "ACP init timeout"))
-      return
-    let data = readAvailable(outFd)
-    if data.len > 0:
-      lineBuffer &= data
-      var lines = lineBuffer.split('\n')
-      lineBuffer = lines.pop()
-      for line in lines:
-        if line.len == 0: continue
-        try:
-          let j = parseJson(line)
-          if j.hasKey("result") and j.hasKey("id"):
-            initDone = true
-            t.isReady = true
-            t.sendResponse(AIMessage(kind: amkReady))
-          elif j.hasKey("error"):
-            let errMsg = j["error"]["message"].getStr()
-            t.sendResponse(AIMessage(kind: amkError, error: "ACP init failed: " & errMsg))
-            return
-        except CatchableError as e:
-          stderr.writeLine("[ai-thread] parse error during init: " & e.msg)
-
-    if peekExitCode(p) != -1:
-      t.sendResponse(AIMessage(kind: amkError, error: "kimi acp exited during init"))
-      return
+    drainReader(readerChan, lineBuffer):
+      if j.hasKey("result") and j.hasKey("id"):
+        initDone = true
+        t.isReady = true
+        t.sendResponse(AIMessage(kind: amkReady))
+      elif j.hasKey("error") and j.hasKey("id"):
+        bail("ACP init failed: " & j["error"]["message"].getStr())
+    if checkDead():
+      bail("kimi acp exited during init")
+    sleep(1)
 
   # --- Create session ---
   proc createSession() =
@@ -271,48 +340,22 @@ proc aiThreadProc(t: AIThread) {.thread.} =
 
   createSession()
 
-  var sessionDone = false
-  var sessionRetries = 0
   while not sessionDone:
-    sleep(10)
-    inc sessionRetries
-    if sessionRetries > 500:  # 5 second timeout
-      t.sendResponse(AIMessage(kind: amkError, error: "ACP session creation timeout"))
-      return
-    let data = readAvailable(outFd)
-    if data.len > 0:
-      lineBuffer &= data
-      var lines = lineBuffer.split('\n')
-      lineBuffer = lines.pop()
-      for line in lines:
-        if line.len == 0: continue
-        try:
-          let j = parseJson(line)
-          if j.hasKey("result") and j.hasKey("id"):
-            if j["result"].hasKey("sessionId"):
-              sessionId = j["result"]["sessionId"].getStr()
-              sessionDone = true
-          elif j.hasKey("error"):
-            let errMsg = j["error"]["message"].getStr()
-            t.sendResponse(AIMessage(kind: amkError, error: "ACP session/new failed: " & errMsg))
-            return
-        except CatchableError as e:
-          stderr.writeLine("[ai-thread] parse error during session/new: " & e.msg)
-
-    if peekExitCode(p) != -1:
-      t.sendResponse(AIMessage(kind: amkError, error: "kimi acp exited during session creation"))
-      return
+    drainReader(readerChan, lineBuffer):
+      if j.hasKey("result") and j.hasKey("id") and j["result"].hasKey("sessionId"):
+        sessionId = j["result"]["sessionId"].getStr()
+        sessionDone = true
+      elif j.hasKey("error") and j.hasKey("id"):
+        bail("ACP session/new failed: " & j["error"]["message"].getStr())
+    if checkDead():
+      bail("kimi acp exited during session creation")
+    sleep(1)
 
   if sessionId.len == 0:
-    t.sendResponse(AIMessage(kind: amkError, error: "ACP session creation returned no sessionId"))
-    return
+    bail("ACP session creation returned no sessionId")
 
   # --- Main loop ---
-  var pendingTurnId = -1
-  var cancelled = false
-
   while true:
-    # Check for requests from app
     var reqMsg: AIMessage
     if channel_spsc.tryReceive(t.reqChan, reqMsg):
       case reqMsg.kind
@@ -320,9 +363,7 @@ proc aiThreadProc(t: AIThread) {.thread.} =
         let reqId = nextId
         nextId = sendJsonRpc(p, nextId, "session/prompt", %*{
           "sessionId": sessionId,
-          "prompt": [
-            {"type": "text", "text": reqMsg.text}
-          ]
+          "prompt": [{"type": "text", "text": reqMsg.text}]
         })
         pendingTurnId = reqId
         cancelled = false
@@ -344,75 +385,21 @@ proc aiThreadProc(t: AIThread) {.thread.} =
       else:
         discard
 
-    # Check for output from kimi
-    let data = readAvailable(outFd)
-    if data.len > 0:
-      lineBuffer &= data
-      var lines = lineBuffer.split('\n')
-      lineBuffer = lines.pop()
-      for line in lines:
-        if line.len == 0: continue
-        try:
-          let j = parseJson(line)
-          if j.hasKey("method") and j.hasKey("id"):
-            # Request from agent (tool call)
-            t.handleAgentRequest(p, j)
-          elif j.hasKey("method") and not j.hasKey("id"):
-            # Notification from agent
-            let rpcMethod = j["method"].getStr()
-            if rpcMethod == "session/update":
-              let update = j["params"]["update"]
-              let updateType = update["sessionUpdate"].getStr()
-              case updateType
-              of "agent_message_chunk":
-                if not cancelled:
-                  let text = update["content"].getStr()
-                  t.sendResponse(AIMessage(kind: amkResponseChunk, text: text))
-              of "agent_thought_chunk":
-                if not cancelled:
-                  var text = ""
-                  if update.hasKey("content"):
-                    let contentNode = update["content"]
-                    if contentNode.kind == JString:
-                      text = contentNode.getStr()
-                    elif contentNode.kind == JObject:
-                      for key in ["text", "thought", "reasoning", "content", "message"]:
-                        if contentNode.hasKey(key) and contentNode[key].kind == JString:
-                          text = contentNode[key].getStr()
-                          break
-                  if text.len > 0:
-                    t.sendResponse(AIMessage(kind: amkThinking, text: text))
-              of "tool_call_start":
-                stderr.writeLine("[ai-thread] tool_call_start")
-              of "tool_call_progress":
-                discard
-              else:
-                discard
-          elif j.hasKey("result") and j.hasKey("id"):
-            # Response to our request
-            let respId = j["id"].getInt()
-            if not sessionDone and j["result"].hasKey("sessionId"):
-              sessionId = j["result"]["sessionId"].getStr()
-              sessionDone = true
-            elif respId == pendingTurnId:
-              pendingTurnId = -1
-              if not cancelled:
-                t.sendResponse(AIMessage(kind: amkResponseDone))
-          elif j.hasKey("error") and j.hasKey("id"):
-            let respId = j["id"].getInt()
-            if respId == pendingTurnId:
-              pendingTurnId = -1
-              if not cancelled:
-                let errMsg = j["error"]["message"].getStr()
-                t.sendResponse(AIMessage(kind: amkError, error: errMsg))
-        except CatchableError as e:
-          stderr.writeLine("[ai-thread] parse error: " & e.msg & " | line: " & line[0..min(80, line.len-1)])
+    drainReader(readerChan, lineBuffer):
+      handleAgentJson(t, p, j, sessionId, sessionDone, pendingTurnId, cancelled)
 
-    if peekExitCode(p) != -1:
+    if checkDead():
       t.sendResponse(AIMessage(kind: amkError, error: "kimi acp process exited"))
       break
 
-    sleep(5)  # 5ms
+    sleep(1)
+
+  readerChan.close()
+  joinThread(readerThread)
+
+# ---------------------------------------------------------------------------
+#  Public API
+# ---------------------------------------------------------------------------
 
 proc newAIThread*(): AIThread =
   result = AIThread(

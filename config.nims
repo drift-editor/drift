@@ -1,3 +1,4 @@
+--define:ChronosAsync
 when defined(macosx):
   switch("passC", "-Wno-incompatible-function-pointer-types")
 # begin Nimble config (version 2)

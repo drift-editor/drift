@@ -210,7 +210,6 @@ proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
         if content.len > 0:
           promptText = "Current file: " & b.path & "\n```\n" & content & "\n```\n\n" & text
     app.aiThread.sendMessage(promptText)
-    app.aiPanel.messages.add(ChatMessage(role: "user", content: text))
     app.aiPanel.isStreaming = true
   app.aiPanel.onNewSession = proc() =
     if app.aiThread != nil:
