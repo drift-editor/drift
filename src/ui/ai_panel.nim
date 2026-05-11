@@ -217,6 +217,20 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
     panel.cursorVisible = true
     panel.lastBlinkTick = getTicks()
     return true
+  of KeyV:
+    let pasteMod = when defined(macosx): GuiPressed else: CtrlPressed
+    if pasteMod in e.mods:
+      let text = getClipboardText()
+      if text.len > 0:
+        if panel.cursorPos < panel.inputText.len:
+          panel.inputText = panel.inputText[0..<panel.cursorPos] & text & panel.inputText[panel.cursorPos..^1]
+        else:
+          panel.inputText.add(text)
+        panel.cursorPos += text.len
+        panel.cursorVisible = true
+        panel.lastBlinkTick = getTicks()
+        return true
+    return false
   else:
     discard
   false
