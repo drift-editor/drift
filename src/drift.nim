@@ -57,9 +57,11 @@ proc main() =
       let root = parentDir(path)
       if root.len > 0:
         app.openFolder(root)
+        app.addRecentFolder(root)
       app.hideWelcome()
     elif dirExists(path):
       app.openFolder(path)
+      app.addRecentFolder(path)
       app.hideWelcome()
     else:
       echo "Path does not exist: ", path

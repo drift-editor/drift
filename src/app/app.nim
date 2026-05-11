@@ -802,6 +802,11 @@ proc addRecentFile(app: App, path: string) =
   saveRecentFiles(app.recentFiles)
   app.welcomeScreen.updateRecentFiles(recentItems(app.recentFiles))
 
+proc addRecentFolder*(app: App, path: string) =
+  app.recentFiles = addToRecentFiles(app.recentFiles, path, isFolder = true)
+  saveRecentFiles(app.recentFiles)
+  app.welcomeScreen.updateRecentFiles(recentItems(app.recentFiles))
+
 proc offsetAtPos(text: string; line, col: int): int =
   var currLine = 0
   var currCol = 0
@@ -1003,7 +1008,6 @@ proc openBuffer(app: App, path: string): int =
     let name = path.extractFilename
     discard app.tabBar.addTab($result, name)
     app.switchBuffer(result)
-    app.addRecentFile(path)
     return result
 
   var ed = createSynEdit(app.font, driftSyneditTheme())
@@ -1012,7 +1016,6 @@ proc openBuffer(app: App, path: string): int =
   if fileExists(path):
     try:
       ed.loadFromFile(path)
-      app.addRecentFile(path)
     except CatchableError as err:
       discard app.notificationManager.error("Failed to load " & path.extractFilename & ": " & err.msg)
   app.buffers.add(Buffer(ed: ed, path: path))
@@ -1069,7 +1072,6 @@ proc saveCurrentBuffer(app: App): bool =
     discard app.notificationManager.error("Failed to save " & app.buffers[idx].path.extractFilename & ": " & err.msg)
     return false
   discard app.notificationManager.success("Saved " & app.buffers[idx].path.extractFilename)
-  app.addRecentFile(app.buffers[idx].path)
   app.lastDiffLines[idx] = getDiffLines(app.buffers[idx].path)
   if app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and app.buffers[idx].path.endsWith(".nim"):
     let text = app.buffers[idx].ed.fullText()
@@ -1103,7 +1105,6 @@ proc saveAsDialog*(app: App) =
     let name = if b.path.len > 0: b.path.extractFilename else: "untitled"
     discard app.tabBar.addTab($i, name)
   discard app.tabBar.setActiveTab($app.currentBuffer)
-  app.addRecentFile(path)
   # Notify LSP about the new file path
   if app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and path.endsWith(".nim"):
     let text = app.buffers[app.currentBuffer].ed.fullText()
@@ -1116,6 +1117,7 @@ proc openFileDialog*(app: App): bool =
     let path = res.get()
     if fileExists(path):
       discard app.openBuffer(path)
+      app.addRecentFile(path)
       return true
   false
 
@@ -1290,10 +1292,12 @@ proc init*(app: App) =
     if isFolder:
       if dirExists(path):
         app.openFolder(path)
+        app.addRecentFolder(path)
         app.hideWelcome()
     else:
       if startAccessingRecentFile(app.recentFiles, path):
         discard app.openBuffer(path)
+        app.addRecentFile(path)
         app.hideWelcome()
       else:
         app.recentFiles = loadRecentFiles()
@@ -1549,6 +1553,7 @@ proc openFile*(app: App, path: string): bool =
   if not fileExists(path):
     return false
   discard app.openBuffer(path)
+  app.addRecentFile(path)
   return true
 
 proc openFolder*(app: App, path: string) =

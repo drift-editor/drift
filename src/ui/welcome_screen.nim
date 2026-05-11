@@ -100,8 +100,9 @@ proc updateRecentFiles*(screen: WelcomeScreen, files: seq[tuple[path: string, is
       section.items = @[]
       for item in files:
         let icon = if item.isFolder: iiFolder else: iiHistory
+        let cleanPath = normalizePathEnd(item.path, trailingSep = false)
         section.items.add(WelcomeItem(
-          label: extractFilename(item.path), hotkey: "", icon: icon, action: waRecentFile, data: item.path
+          label: extractFilename(cleanPath), hotkey: "", icon: icon, action: waRecentFile, data: item.path
         ))
       break
 
