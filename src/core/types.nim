@@ -214,7 +214,9 @@ proc recti*(x, y, w, h: int): Recti = Recti(x: x, y: y, width: w, height: h)
 proc `+`*(a, b: Vec2): Vec2 = vec2(a.x + b.x, a.y + b.y)
 proc `-`*(a, b: Vec2): Vec2 = vec2(a.x - b.x, a.y - b.y)
 proc `*`*(v: Vec2, s: float32): Vec2 = vec2(v.x * s, v.y * s)
-proc `/`*(v: Vec2, s: float32): Vec2 = vec2(v.x / s, v.y / s)
+proc `/`*(v: Vec2, s: float32): Vec2 =
+  if s == 0.0: return vec2(0, 0)
+  vec2(v.x / s, v.y / s)
 
 proc contains*(r: Rect, p: Vec2): bool =
   p.x >= r.x and p.x < r.x + r.width and

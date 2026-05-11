@@ -140,6 +140,8 @@ proc moveCursorChar*(state: EditorState, delta: int, extendSelection: bool = fal
 
 proc moveCursorWord*(state: EditorState, forward: bool, extendSelection: bool = false) =
   ## Move cursor to next/previous word
+  if state.cursor.line < 0 or state.cursor.line >= state.document.lines.len:
+    return
   let line = state.document.lines[state.cursor.line]
   var newCol = state.cursor.col
   
@@ -228,6 +230,8 @@ proc deleteChar*(state: EditorState, forward: bool = true) =
 
 proc insertNewline*(state: EditorState) =
   ## Insert newline with auto-indent
+  if state.cursor.line < 0 or state.cursor.line >= state.document.lines.len:
+    return
   let currentLine = state.document.lines[state.cursor.line]
   var indent = ""
   for c in currentLine:
@@ -286,6 +290,9 @@ proc ensureCursorVisible*(state: EditorState, lineHeight: float32) =
 proc screenToPosition*(state: EditorState, screenPos: Vec2, charWidth, lineHeight: float32): CursorPos =
   let x = screenPos.x - state.viewport.x + state.scrollOffset.x
   let y = screenPos.y - state.viewport.y + state.scrollOffset.y
+  
+  if lineHeight <= 0.0 or charWidth <= 0.0:
+    return CursorPos(line: 0, col: 0)
   
   let line = int(y / lineHeight)
   let col = int(x / charWidth)

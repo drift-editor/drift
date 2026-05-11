@@ -174,7 +174,8 @@ proc startLSP*(language, serverName: string, initOptions: JsonNode = newJObject(
     let initResp = parseJson(initRespStr)
     if initResp.hasKey("error"):
       client.state = lspError
-      client.errorMsg = $initResp["error"]["message"]
+      let errObj = initResp["error"]
+      client.errorMsg = if errObj.hasKey("message"): errObj["message"].getStr() else: "unknown initialize error"
       stderr.writeLine("[lsp-client] error: initialize returned error: " & client.errorMsg)
       if client.process != nil:
         try: 
@@ -245,7 +246,7 @@ proc readLoop(client: LSPClient) {.async: (raises: [Exception]).} =
       await sleepAsync(50.milliseconds)
 
 proc ensureReadLoop*(client: LSPClient) =
-  if client.readLoop.isNil or client.readLoop.finished or client.readLoop.failed:
+  if client.readLoop == nil or client.readLoop.finished or client.readLoop.failed:
     client.readLoop = readLoop(client)
     asyncSpawn client.readLoop
 
@@ -265,7 +266,7 @@ proc stopLSP*(client: LSPClient) {.async.} =
   except CatchableError as e:
     stderr.writeLine("[lsp-client] error: shutdown failed: " & e.msg)
   client.state = lspShutdown
-  if not client.readLoop.isNil and not client.readLoop.finished:
+  if client.readLoop != nil and not client.readLoop.finished:
     try:
       if not await withTimeout(client.readLoop, 5.seconds):
         stderr.writeLine("[lsp-client] warning: readLoop shutdown timed out")
@@ -300,7 +301,7 @@ proc toFileUri*(path: string): string =
     else:
       encoded.add('%' & toHex(ord(c), 2).toUpperAscii())
   when defined(windows):
-    if encoded.len > 0 and encoded[1] == ':':
+    if encoded.len >= 2 and encoded[1] == ':':
       result = "file:///" & encoded
     else:
       result = "file://" & encoded
@@ -311,6 +312,12 @@ proc decodeFileUri*(uri: string): string =
   ## Strip file:// prefix and decode percent-encoded characters.
   if uri.startsWith("file://"):
     result = uri[7..^1]
+    when defined(windows):
+      ## On Windows toFileUri emits file:///C:/path (three slashes).
+      ## Stripping file:// leaves /C:/path which is invalid — remove the
+      ## leading slash so the drive letter is at the start.
+      if result.len > 0 and result[0] == '/':
+        result = result[1..^1]
   else:
     result = uri
   # Decode common percent-encoded characters

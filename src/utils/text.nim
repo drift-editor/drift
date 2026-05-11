@@ -28,9 +28,18 @@ proc splitLinesKeep*(s: string): seq[string] =
 
 proc lineCount*(s: string): int =
   ## Number of lines in a string (equivalent to splitLinesKeep.len).
-  s.count('\n') + 1
+  ## Handles both \n and \r line endings.
+  var count = 0
+  for c in s:
+    if c == '\n' or c == '\r':
+      count += 1
+  count + 1
 
 proc lastLineLen*(s: string): int =
   ## Length of the last line (characters after the final newline).
-  let idx = s.rfind('\n')
+  ## Handles both \n and \r line endings.
+  var idx = -1
+  for i, c in s:
+    if c == '\n' or c == '\r':
+      idx = i
   if idx < 0: s.len else: s.len - idx - 1

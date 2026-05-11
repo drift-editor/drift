@@ -191,7 +191,7 @@ proc findAll*(panel: var SearchPanel; ed: ptr SynEdit) =
         let pattern = re(panel.findText)
         for m in text.findIter(pattern):
           let a = m.matchBounds.a
-          let b = m.matchBounds.b
+          let b = m.matchBounds.b - 1  # nre uses exclusive end; normalize to inclusive
           if panel.wholeWord:
             let before = if a > 0: text[a-1] else: '\0'
             let after = if b + 1 < text.len: text[b+1] else: '\0'
@@ -250,9 +250,12 @@ proc findAll*(panel: var SearchPanel; ed: ptr SynEdit) =
         excludeExtArg.add(" ")
       excludeExtArg.add("--glob !*/" & dir & "/*")
 
-    var rgCmd = "rg -n " & excludeExtArg & " " & panel.findText.quoteShell() & " ."
+    var rgFlags = "rg -n"
     if not panel.caseSensitive:
-      rgCmd = "rg -n -i " & excludeExtArg & " " & panel.findText.quoteShell() & " ."
+      rgFlags &= " -i"
+    if not panel.useRegex:
+      rgFlags &= " -F"
+    let rgCmd = rgFlags & " " & excludeExtArg & " " & panel.findText.quoteShell() & " ."
 
     let (output, exitCode) = execCmdEx(rgCmd, workingDir = panel.workspaceRoot)
 
@@ -271,7 +274,11 @@ proc findAll*(panel: var SearchPanel; ed: ptr SynEdit) =
           let colon3 = afterColon.find(":")
           if colon3 < 0: continue
           let lineNumStr = afterColon[0..<colon3]
-          let lineNum = parseInt(lineNumStr) - 1
+          var lineNum = 0
+          try:
+            lineNum = parseInt(lineNumStr) - 1
+          except ValueError:
+            continue
           let preview = afterColon[colon3+1..^1]
           let searchText = if panel.caseSensitive: panel.findText else: panel.findText.toLowerAscii()
           let searchTarget = if panel.caseSensitive: preview else: preview.toLowerAscii()

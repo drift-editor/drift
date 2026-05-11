@@ -1,6 +1,6 @@
 ## Drift Editor - uirelays-based Application
 
-import std/[os, osproc, strutils, json, options, monotimes, times]
+import std/[os, osproc, strutils, json, options, monotimes, times, atomics]
 import uirelays
 import chronos
 from pixie import readImage
@@ -255,7 +255,7 @@ proc detectLineEnding(text: string): string =
   else: "LF"
 
 proc lspStatusString(app: App): string =
-  if app.lspThread != nil and app.lspThread.isReady:
+  if app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
     return "LSP: " & app.lspServer
   elif app.lspStarting:
     return "LSP: starting..."
@@ -263,7 +263,7 @@ proc lspStatusString(app: App): string =
     return "LSP: off"
 
 proc dapStatusString(app: App): string =
-  if app.dapThread != nil and app.dapThread.isReady:
+  if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
     if app.debugStopped:
       return "DBG: stopped"
     elif app.debugSessionActive:
@@ -432,6 +432,12 @@ proc sectionBoundsAtIndex(app: App, statusBounds: coords.Rect, idx: int): coords
 
 proc aiSectionBounds(app: App, statusBounds: coords.Rect): coords.Rect =
   sectionBoundsAtIndex(app, statusBounds, app.statusBar.aiIndex)
+
+proc pathStartsWith(path, prefix: string): bool =
+  ## Cross-platform path prefix check normalizing both separators.
+  let normPath = path.replace('\\', '/')
+  let normPrefix = prefix.replace('\\', '/')
+  normPath.startsWith(normPrefix & "/")
 
 proc lspSectionBounds(app: App, statusBounds: coords.Rect): coords.Rect =
   sectionBoundsAtIndex(app, statusBounds, app.statusBar.lspIndex)
@@ -712,7 +718,7 @@ proc closeBuffer(app: App, idx: int) =
   # Notify LSP that the document is closed (keeps diagnostics in panel
   # for the user to browse even after the file is closed).
   let closedPath = app.buffers[idx].path
-  if closedPath.len > 0 and app.lspThread != nil and app.lspThread.isReady:
+  if closedPath.len > 0 and app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
     app.lspThread.notifyDidClose(closedPath)
   
   # Note: uirelays backends do not implement freeImage (drawRelays.freeImage
@@ -907,9 +913,12 @@ proc handleDiagnostics(app: App; msg: JsonNode) =
     for i, ch in text:
       if ch == '\n':
         lineStarts.add(i + 1)
-    proc offsetFast(ls: seq[int]; line, col: int): int =
-      if line < ls.len: ls[line] + col
-      else: ls[^1] + col
+    proc offsetFast(ls: seq[int]; line, col, maxLen: int): int =
+      if line >= 0 and line < ls.len: result = ls[line] + col
+      elif line < 0: result = col
+      else: result = ls[^1] + col
+      if result < 0: result = 0
+      if result > maxLen: result = maxLen
 
     var diagMarkers: seq[tuple[a, b: int, color: screen.Color]] = @[]
     var diagLines: seq[int] = @[]
@@ -917,13 +926,21 @@ proc handleDiagnostics(app: App; msg: JsonNode) =
       for diag in diagnostics:
         if not diag.hasKey("range"): continue
         let range = diag["range"]
-        let startLine = range["start"]["line"].getInt()
-        let startChar = range["start"]["character"].getInt()
-        let endLine = range["end"]["line"].getInt()
-        let endChar = range["end"]["character"].getInt()
-        let a = offsetFast(lineStarts, startLine, startChar)
-        let b = max(a, offsetFast(lineStarts, endLine, endChar) - 1)
-        diagMarkers.add((a, b, color(243, 139, 168, 80)))
+        if not range.hasKey("start") or not range.hasKey("end"): continue
+        let start = range["start"]
+        let `end` = range["end"]
+        if not start.hasKey("line") or not start.hasKey("character"): continue
+        if not `end`.hasKey("line") or not `end`.hasKey("character"): continue
+        let startLine = start["line"].getInt()
+        let startChar = start["character"].getInt()
+        let endLine = `end`["line"].getInt()
+        let endChar = `end`["character"].getInt()
+        let a = offsetFast(lineStarts, startLine, startChar, text.len)
+        let b = max(a, offsetFast(lineStarts, endLine, endChar, text.len) - 1)
+        if b < a:
+          diagMarkers.add((a, a, color(243, 139, 168, 80)))
+        else:
+          diagMarkers.add((a, b, color(243, 139, 168, 80)))
         diagLines.add(startLine)
 
     app.lastDiagLines[targetIdx] = diagLines
@@ -1017,7 +1034,7 @@ proc openBuffer(app: App, path: string): int =
       stderr.writeLine("[app] starting LSP thread: " & lspExeFor(app.lspServer))
       app.lspThread = newLSPThread(lspExeFor(app.lspServer), app.config.lspConfig)
       app.lspStarting = true
-    elif app.lspThread != nil and app.lspThread.isReady:
+    elif app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
       app.lspThread.notifyDidOpen(path, ed.fullText())
 
 proc newBuffer(app: App) =
@@ -1054,7 +1071,7 @@ proc saveCurrentBuffer(app: App): bool =
   discard app.notificationManager.success("Saved " & app.buffers[idx].path.extractFilename)
   app.addRecentFile(app.buffers[idx].path)
   app.lastDiffLines[idx] = getDiffLines(app.buffers[idx].path)
-  if app.lspThread != nil and app.lspThread.isReady and app.buffers[idx].path.endsWith(".nim"):
+  if app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and app.buffers[idx].path.endsWith(".nim"):
     let text = app.buffers[idx].ed.fullText()
     app.lspThread.notifyDidChange(app.buffers[idx].path, text)
   return true
@@ -1088,7 +1105,7 @@ proc saveAsDialog*(app: App) =
   discard app.tabBar.setActiveTab($app.currentBuffer)
   app.addRecentFile(path)
   # Notify LSP about the new file path
-  if app.lspThread != nil and app.lspThread.isReady and path.endsWith(".nim"):
+  if app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and path.endsWith(".nim"):
     let text = app.buffers[app.currentBuffer].ed.fullText()
     app.lspThread.notifyDidOpen(path, text)
 
@@ -1164,9 +1181,15 @@ proc init*(app: App) =
   # Tab bar
   app.tabBar = newTabBar()
   app.tabBar.onTabChange = proc(id: string) =
-    app.switchBuffer(parseInt(id))
+    try:
+      app.switchBuffer(parseInt(id))
+    except ValueError:
+      discard
   app.tabBar.onTabClose = proc(id: string) =
-    app.closeBuffer(parseInt(id))
+    try:
+      app.closeBuffer(parseInt(id))
+    except ValueError:
+      discard
 
   # File explorer
   app.fileExplorer = newFileExplorer()
@@ -1286,9 +1309,7 @@ proc init*(app: App) =
   # Location picker (goto-definition with multiple results)
   app.locationPicker = newLocationPicker()
   app.locationPicker.onSelect = proc(loc: Location) =
-    var path = loc.uri
-    if path.startsWith("file://"):
-      path = path[7..^1]
+    let path = decodeFileUri(loc.uri)
     if fileExists(path):
       discard app.openBuffer(path)
       if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
@@ -1399,7 +1420,7 @@ proc init*(app: App) =
         app.inputDialog.text = ""
         app.inputDialog.centerOnScreen(app.width, app.height)
         app.inputDialog.onResult = proc(confirmed: bool, text: string) =
-          if confirmed and text.len > 0:
+          if confirmed and text.len > 0 and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
             try:
               let lineNum = parseInt(text)
               app.buffers[app.currentBuffer].ed.gotoLine(lineNum, 0)
@@ -1425,7 +1446,7 @@ proc init*(app: App) =
   app.commandPalette.registerCommand("debug.start", "Start Debugging", "Start a debug session", ccDebug, "F5",
     proc() =
       if app.debugSessionActive:
-        if app.debugStopped and app.dapThread != nil and app.dapThread.isReady:
+        if app.debugStopped and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
           app.debugStopped = false
           app.debugPanel.status = "Running"
           app.dapThread.requestContinue(app.debugStopThreadId)
@@ -1472,21 +1493,21 @@ proc init*(app: App) =
 
   app.commandPalette.registerCommand("debug.stepOver", "Step Over", "Step over the current line", ccDebug, "F10",
     proc() =
-      if app.debugStopped and app.dapThread != nil and app.dapThread.isReady:
+      if app.debugStopped and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
         app.debugStopped = false
         app.debugPanel.status = "Running"
         app.dapThread.requestNext(app.debugStopThreadId))
 
   app.commandPalette.registerCommand("debug.stepInto", "Step Into", "Step into the current function", ccDebug, "F11",
     proc() =
-      if app.debugStopped and app.dapThread != nil and app.dapThread.isReady:
+      if app.debugStopped and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
         app.debugStopped = false
         app.debugPanel.status = "Running"
         app.dapThread.requestStepIn(app.debugStopThreadId))
 
   app.commandPalette.registerCommand("debug.stepOut", "Step Out", "Step out of the current function", ccDebug, "Shift+F11",
     proc() =
-      if app.debugStopped and app.dapThread != nil and app.dapThread.isReady:
+      if app.debugStopped and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
         app.debugStopped = false
         app.debugPanel.status = "Running"
         app.dapThread.requestStepOut(app.debugStopThreadId))
@@ -1509,7 +1530,7 @@ proc init*(app: App) =
         app.breakpoints.add((path: b.path, line: line, enabled: true))
       app.updateBreakpointMarkers(app.currentBuffer)
       # Update breakpoints in running session
-      if app.dapThread != nil and app.dapThread.isReady:
+      if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
         var lines: seq[int] = @[]
         for bp in app.breakpoints:
           if bp.path == b.path and bp.enabled:
@@ -1584,9 +1605,7 @@ proc showLocationPicker*(app: App, locations: seq[Location]) =
 
   var items: seq[LocationItem] = @[]
   for loc in locations:
-    var path = loc.uri
-    if path.startsWith("file://"):
-      path = path[7..^1]
+    let path = decodeFileUri(loc.uri)
     let display = path.extractFilename & " :" & $(loc.range.start.line + 1) & ":" & $(loc.range.start.character + 1)
     items.add(LocationItem(display: display, loc: loc))
 
@@ -1864,8 +1883,8 @@ proc run*(app: App) =
                 try:
                   moveDir(path, newPath)
                   for i, b in app.buffers:
-                    if b.path.startsWith(path & "/"):
-                      app.buffers[i].path = newPath / b.path.relativePath(path)
+                    if pathStartsWith(b.path, path):
+                      app.buffers[i].path = newPath / b.path.replace('\\', '/').relativePath(path.replace('\\', '/'))
                   app.fileExplorer.refresh()
                 except CatchableError as err:
                   discard app.notificationManager.error("Failed to rename: " & err.msg)
@@ -1890,7 +1909,7 @@ proc run*(app: App) =
                 try:
                   removeDir(path)
                   for i in countdown(app.buffers.high, 0):
-                    if app.buffers[i].path.startsWith(path & "/"):
+                    if pathStartsWith(app.buffers[i].path, path):
                       app.closeBuffer(i)
                   app.fileExplorer.refresh()
                 except CatchableError as err:
@@ -2018,7 +2037,10 @@ proc run*(app: App) =
         if path.fileExists:
           for i, b in app.buffers:
             if b.path == path:
-              app.buffers[i].ed.loadFromFile(path)
+              if not b.ed.changed:
+                app.buffers[i].ed.loadFromFile(path)
+              else:
+                discard app.notificationManager.warning("File changed externally: " & path.extractFilename & " — reload skipped (unsaved changes)")
               break
         if path.dirExists or (path.parentDir.dirExists):
           app.fileExplorer.refresh()
@@ -2132,7 +2154,7 @@ proc run*(app: App) =
           app.debugStopThreadId = resp.int1
           app.debugPanel.status = "Stopped"
           stderr.writeLine("[app] DAP stopped: reason=" & resp.str1 & " threadId=" & $resp.int1)
-          if app.dapThread != nil and app.dapThread.isReady and resp.int1 > 0:
+          if app.dapThread != nil and app.dapThread.isReady.load(moAcquire) and resp.int1 > 0:
             app.dapThread.requestStackTrace(resp.int1)
           # Try to navigate to stop location if description contains path:line
           if resp.str2.len > 0:
@@ -2194,7 +2216,6 @@ proc run*(app: App) =
           app.aiPanel.appendText(resp.text)
         of amkResponseDone:
           app.aiPanel.finalizeMessage()
-          app.aiPanel.messages.add(ChatMessage(role: "assistant", content: app.aiPanel.lastMessageContent()))
         of amkThinking:
           app.aiPanel.appendText(resp.text)
         of amkFileChanged:
@@ -2257,7 +2278,7 @@ proc run*(app: App) =
         let edAct = app.buffers[idx].ed.draw(edEvent, editorBounds, app.focus == "editor" or editorHovered)
         case edAct.kind
         of ctrlHover:
-          if e.kind == MouseMoveEvent and app.lspThread != nil and app.lspThread.isReady and app.buffers[idx].path.len > 0:
+          if e.kind == MouseMoveEvent and app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and app.buffers[idx].path.len > 0:
             if edAct.pos != app.hoverPendingPos:
               app.hoverPendingPos = edAct.pos
               let (line, col) = bufferPosToLineCol(app.buffers[idx].ed.fullText(), edAct.pos)
@@ -2266,7 +2287,7 @@ proc run*(app: App) =
               app.hoverPendingTick = getTicks() + 400
               stderr.writeLine("[app] ctrlHover pending: pos=" & $edAct.pos & " line=" & $line & " col=" & $col)
         of ctrlClick:
-          if app.lspThread != nil and app.lspThread.isReady and app.buffers[idx].path.len > 0:
+          if app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and app.buffers[idx].path.len > 0:
             let (line, col) = bufferPosToLineCol(app.buffers[idx].ed.fullText(), edAct.pos)
             app.lspThread.requestDefinition(app.buffers[idx].path, line, col)
         of noAction:
@@ -2331,7 +2352,7 @@ proc run*(app: App) =
                          "No file open", color(150, 150, 150), color(0, 0, 0, 0))
 
     # Delayed hover trigger
-    if app.lspThread != nil and app.lspThread.isReady and app.currentBuffer >= 0 and app.buffers[app.currentBuffer].path.len > 0 and
+    if app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len and app.buffers[app.currentBuffer].path.len > 0 and
        getTicks() >= app.hoverPendingTick:
       let idx = app.currentBuffer
       stderr.writeLine("[app] hover trigger fired: pos=" & $app.hoverPendingPos & " line=" & $app.hoverPendingLine & " col=" & $app.hoverPendingCol & " mouse=(" & $app.mouseX & "," & $app.mouseY & ")")

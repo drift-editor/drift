@@ -118,7 +118,7 @@ proc cursorVisualPos(text: string, cursorPos: int, font: Font, maxW: int): tuple
   for rawLine in text.split('\n'):
     var currentLine = ""
     let words = rawLine.split(' ')
-    for i, word in words:
+    for word in words:
       let spacePrefix = if currentLine.len > 0: " " else: ""
       let test = currentLine & spacePrefix & word
       if font.measureText(test).w > maxW and currentLine.len > 0:
@@ -127,7 +127,12 @@ proc cursorVisualPos(text: string, cursorPos: int, font: Font, maxW: int): tuple
         if cursorPos >= lineStart and cursorPos <= lineEnd:
           let offsetInLine = cursorPos - lineStart
           return (lineIdx, font.measureText(currentLine[0..<offsetInLine]).w)
-        charIdx += currentLine.len + 1  # +1 for the space that starts next line
+        # Advance charIdx by the actual characters consumed in original text
+        # currentLine may consist of multiple words separated by single spaces
+        # We need to find how many chars in rawLine correspond to currentLine
+        charIdx += currentLine.len
+        if currentLine.len < rawLine.len:
+          charIdx += 1  # skip one space
         lineIdx += 1
         currentLine = word
       else:
@@ -140,7 +145,9 @@ proc cursorVisualPos(text: string, cursorPos: int, font: Font, maxW: int): tuple
       if offsetInLine <= 0:
         return (lineIdx, 0)
       return (lineIdx, font.measureText(currentLine[0..<offsetInLine]).w)
-    charIdx += currentLine.len + 1  # +1 for newline
+    charIdx += currentLine.len
+    if charIdx < text.len and text[charIdx] == '\n':
+      charIdx += 1  # skip newline
     lineIdx += 1
   # Cursor at end
   let allLines = wrapTextToWidth(text, font, maxW)
@@ -221,20 +228,20 @@ proc handleTextInput*(panel: AIPanel, e: Event): bool =
     return false
   if e.text.len == 0:
     return false
-  let ch = e.text[0]
-  if ch == '\0' or ch == '\b' or ord(ch) == 127:
+  var text = ""
+  for c in e.text:
+    if c == '\0': break
+    text.add(c)
+  if text.len == 0 or text == "\b" or text == "\x7F":
     return false  # Backspace handled in handleKey
-  if ch >= ' ' or ch == '\n' or ch == '\r':
-    let s = $ch
-    if panel.cursorPos < panel.inputText.len:
-      panel.inputText = panel.inputText[0..<panel.cursorPos] & s & panel.inputText[panel.cursorPos..^1]
-    else:
-      panel.inputText.add(s)
-    inc panel.cursorPos
-    panel.cursorVisible = true
-    panel.lastBlinkTick = getTicks()
-    return true
-  false
+  if panel.cursorPos < panel.inputText.len:
+    panel.inputText = panel.inputText[0..<panel.cursorPos] & text & panel.inputText[panel.cursorPos..^1]
+  else:
+    panel.inputText.add(text)
+  panel.cursorPos += text.len
+  panel.cursorVisible = true
+  panel.lastBlinkTick = getTicks()
+  return true
 
 proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
   if e.kind == MouseDownEvent:

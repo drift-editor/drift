@@ -160,7 +160,7 @@ template initCommands*(app: untyped): untyped =
         app.inputDialog.text = ""
         app.inputDialog.centerOnScreen(app.width, app.height)
         app.inputDialog.onResult = proc(confirmed: bool, text: string) =
-          if confirmed and text.len > 0:
+          if confirmed and text.len > 0 and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
             try:
               let lineNum = parseInt(text)
               app.buffers[app.currentBuffer].ed.gotoLine(lineNum, 0)

@@ -41,7 +41,7 @@ when defined(macosx):
 
     some(FileBookmark(
       path: filePath,
-      bookmarkData: encode(cast[string](bytes))
+      bookmarkData: encode(bytes)
     ))
 
   proc validateBookmark*(bookmark: FileBookmark): bool =

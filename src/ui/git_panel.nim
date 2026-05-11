@@ -443,21 +443,16 @@ proc handleTextInput*(panel: GitPanel, e: Event): bool =
     return false
   if e.kind != TextInputEvent:
     return false
-  if e.text.len == 0:
+  var text = ""
+  for c in e.text:
+    if c == '\0': break
+    text.add(c)
+  if text.len == 0 or text == "\b" or text == "\x7F":
     return false
-  let ch = e.text[0]
-  if ch == '\0':
-    return false
-  if ch == '\b' or ord(ch) == 127:  # Backspace
-    if panel.commitMessage.len > 0:
-      panel.commitMessage.setLen(panel.commitMessage.len - 1)
-    return true
-  if ch >= ' ':
-    panel.commitMessage.add($ch)
-    panel.cursorVisible = true
-    panel.lastBlinkTick = getTicks()
-    return true
-  false
+  panel.commitMessage.add(text)
+  panel.cursorVisible = true
+  panel.lastBlinkTick = getTicks()
+  return true
 
 # Rendering Helpers
 

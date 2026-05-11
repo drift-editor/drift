@@ -16,11 +16,17 @@ proc main() =
       case arg
       of "--width", "-w":
         if i + 1 <= paramCount():
-          config.windowWidth = parseInt(paramStr(i + 1))
+          try:
+            config.windowWidth = parseInt(paramStr(i + 1))
+          except ValueError:
+            stderr.writeLine("Invalid width: " & paramStr(i + 1))
           i += 1
       of "--height", "-h":
         if i + 1 <= paramCount():
-          config.windowHeight = parseInt(paramStr(i + 1))
+          try:
+            config.windowHeight = parseInt(paramStr(i + 1))
+          except ValueError:
+            stderr.writeLine("Invalid height: " & paramStr(i + 1))
           i += 1
       of "--title", "-t":
         if i + 1 <= paramCount():

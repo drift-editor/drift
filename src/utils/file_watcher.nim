@@ -22,7 +22,7 @@ proc newFileWatcher*(): FileWatcher =
 proc addDir*(fw: var FileWatcher; dir: string) =
   if dir.dirExists and dir notin fw.watchDirs:
     fw.watchDirs.add(dir)
-    for kind, fp in walkDir(dir):
+    for fp in walkDirRec(dir):
       if fp.fileExists:
         fw.fileTimes[fp] = fp.getLastModificationTime()
 
@@ -30,8 +30,10 @@ proc pollEvents*(fw: var FileWatcher; maxEvents = 50): seq[FileEvent] =
   result = @[]
   for dir in fw.watchDirs:
     if not dir.dirExists: continue
-    for kind, fp in walkDir(dir):
+    var currentFiles: seq[string] = @[]
+    for fp in walkDirRec(dir):
       if fp.fileExists:
+        currentFiles.add(fp)
         let newMt = fp.getLastModificationTime()
         if fp notin fw.fileTimes:
           fw.fileTimes[fp] = newMt
@@ -43,7 +45,12 @@ proc pollEvents*(fw: var FileWatcher; maxEvents = 50): seq[FileEvent] =
             fw.fileTimes[fp] = newMt
             result.add(FileEvent(path: fp, kind: feModified))
             if result.len >= maxEvents: return
-      elif fp in fw.fileTimes:
-        fw.fileTimes.del(fp)
-        result.add(FileEvent(path: fp, kind: feDeleted))
-        if result.len >= maxEvents: return
+    # Detect deletions: files in fileTimes but not in currentFiles
+    var toDelete: seq[string] = @[]
+    for fp in fw.fileTimes.keys:
+      if fp notin currentFiles:
+        toDelete.add(fp)
+    for fp in toDelete:
+      fw.fileTimes.del(fp)
+      result.add(FileEvent(path: fp, kind: feDeleted))
+      if result.len >= maxEvents: return

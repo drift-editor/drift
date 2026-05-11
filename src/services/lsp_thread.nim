@@ -1,4 +1,5 @@
 import std/[options, json, os, monotimes, tables]
+import std/atomics
 import ../channel_spsc
 import chronos
 import lsp_client
@@ -33,7 +34,7 @@ type
     reqChan: SPSChannel[LSPMessage]
     respChan: SPSChannel[LSPMessage]
     thread: Thread[LSPThread]
-    isReady*: bool
+    isReady*: Atomic[bool]
 
 proc sendResponse(t: LSPThread, msg: LSPMessage) {.inline.} =
   if not t.respChan.isClosed and not channel_spsc.trySend(t.respChan, msg):
@@ -72,7 +73,7 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
             msgBuffer.add((m, mt))
           )
           client.ensureReadLoop()
-          t.isReady = true
+          t.isReady.store(true, moRelease)
           t.sendResponse(LSPMessage(kind: lmkReady, str1: "Ready"))
         else:
           t.sendResponse(LSPMessage(kind: lmkError, str1: client.errorMsg))

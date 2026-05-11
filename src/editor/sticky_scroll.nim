@@ -28,7 +28,10 @@ proc isScopeHeader(line: string): bool =
                     "finally", "enum ", "object ", "concept ",
                     "mixin ", "bind "]
   for k in keywords:
-    if s.startsWith(k): return true
+    if s.startsWith(k):
+      # Guard against identifier prefixes (e.g. "elsewhere" matching "else")
+      if s.len == k.len or s[k.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+        return true
   if s.endsWith("=") or s.endsWith("=>"): return true
   false
 

@@ -211,7 +211,7 @@ proc readLoop(client: DAPClient) {.async: (raises: [Exception]).} =
       await sleepAsync(50.milliseconds)
 
 proc ensureReadLoop*(client: DAPClient) =
-  if client.readLoop.isNil or client.readLoop.finished or client.readLoop.failed:
+  if client.readLoop == nil or client.readLoop.finished or client.readLoop.failed:
     client.readLoop = readLoop(client)
     asyncSpawn client.readLoop
 
@@ -228,7 +228,7 @@ proc stopDAP*(client: DAPClient) {.async.} =
   except CatchableError as e:
     stderr.writeLine("[dap-client] error: disconnect failed: " & e.msg)
   client.state = dapShutdown
-  if not client.readLoop.isNil and not client.readLoop.finished:
+  if client.readLoop != nil and not client.readLoop.finished:
     try:
       if not await withTimeout(client.readLoop, 5.seconds):
         stderr.writeLine("[dap-client] warning: readLoop shutdown timed out")

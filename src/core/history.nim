@@ -106,10 +106,13 @@ proc undo*(history: History, doc: Document): bool =
   if not history.canUndo:
     return false
   
+  let group = history.groups[history.currentIndex]
+  if group.edits.len == 0:
+    history.currentIndex.dec()
+    return true
+  
   history.isUndoing = true
   defer: history.isUndoing = false
-  
-  let group = history.groups[history.currentIndex]
   
   # Apply edits in reverse order
   for i in countdown(group.edits.high, 0):
@@ -128,15 +131,17 @@ proc undo*(history: History, doc: Document): bool =
       
       # Delete without recording to history
       let wasModified = doc.isModified
-      discard doc.deleteRange(edit.position, endPos)
-      doc.undoStack.del(doc.undoStack.high)  # Remove the undo record
+      let delResult = doc.deleteRange(edit.position, endPos)
+      if delResult.isOk and doc.undoStack.len > 0:
+        doc.undoStack.del(doc.undoStack.high)  # Remove the undo record
       doc.isModified = wasModified
     
     of eoDelete:
       # Undo delete = insert
       let wasModified = doc.isModified
-      discard doc.insertText(edit.position, edit.previousContent)
-      doc.undoStack.del(doc.undoStack.high)
+      let insResult = doc.insertText(edit.position, edit.previousContent)
+      if insResult.isOk and doc.undoStack.len > 0:
+        doc.undoStack.del(doc.undoStack.high)
       doc.isModified = wasModified
     
     of eoReplace:
@@ -150,10 +155,13 @@ proc undo*(history: History, doc: Document): bool =
       let endPos = CursorPos(line: endLine, col: endCol)
       
       let wasModified = doc.isModified
-      discard doc.deleteRange(edit.position, endPos)
-      doc.undoStack.del(doc.undoStack.high)
-      discard doc.insertText(edit.position, edit.previousContent)
-      doc.undoStack.del(doc.undoStack.high)
+      let delResult = doc.deleteRange(edit.position, endPos)
+      if delResult.isOk and doc.undoStack.len > 0:
+        doc.undoStack.del(doc.undoStack.high)
+
+      let insResult = doc.insertText(edit.position, edit.previousContent)
+      if insResult.isOk and doc.undoStack.len > 0:
+        doc.undoStack.del(doc.undoStack.high)
       doc.isModified = wasModified
   
   history.currentIndex.dec()
@@ -164,11 +172,14 @@ proc redo*(history: History, doc: Document): bool =
   if not history.canRedo:
     return false
   
-  history.isUndoing = true
-  defer: history.isUndoing = false
-  
   let nextIndex = history.currentIndex + 1
   let group = history.groups[nextIndex]
+  if group.edits.len == 0:
+    history.currentIndex = nextIndex
+    return true
+  
+  history.isUndoing = true
+  defer: history.isUndoing = false
   
   # Apply edits in forward order
   for edit in group.edits:
@@ -176,8 +187,9 @@ proc redo*(history: History, doc: Document): bool =
     
     case edit.operation
     of eoInsert:
-      discard doc.insertText(edit.position, edit.content)
-      doc.undoStack.del(doc.undoStack.high)
+      let insResult = doc.insertText(edit.position, edit.content)
+      if insResult.isOk and doc.undoStack.len > 0:
+        doc.undoStack.del(doc.undoStack.high)
     of eoDelete:
       let nlines = edit.previousContent.lineCount()
       let endLine = edit.position.line + nlines - 1
@@ -186,13 +198,15 @@ proc redo*(history: History, doc: Document): bool =
       else:
         edit.previousContent.lastLineLen + edit.position.col
       let endPos = CursorPos(line: endLine, col: endCol)
-      discard doc.deleteRange(edit.position, endPos)
-      doc.undoStack.del(doc.undoStack.high)
+      let delResult = doc.deleteRange(edit.position, endPos)
+      if delResult.isOk and doc.undoStack.len > 0:
+        doc.undoStack.del(doc.undoStack.high)
     of eoReplace:
-      discard doc.replaceRange(edit.position, edit.position, edit.content)
-      if doc.undoStack.len >= 2:
-        doc.undoStack.del(doc.undoStack.high)
-        doc.undoStack.del(doc.undoStack.high)
+      let repResult = doc.replaceRange(edit.position, edit.position, edit.content)
+      if repResult.isOk:
+        if doc.undoStack.len >= 2:
+          doc.undoStack.del(doc.undoStack.high)
+          doc.undoStack.del(doc.undoStack.high)
     
     doc.isModified = wasModified
   

@@ -24,7 +24,8 @@ type
     rightSectionBounds*: seq[Rect]  ## computed during render, parallel to rightSections
 
 proc newStatusBar*(): StatusBar =
-  StatusBar(leftSections: @[], rightSections: @[], leftIcons: @[], leftColors: @[], hoverRightIndex: -1, activeRightIndex: -1)
+  StatusBar(leftSections: @[], rightSections: @[], leftIcons: @[], leftColors: @[],
+            hoverRightIndex: -1, activeRightIndex: -1, lspIndex: -1, dapIndex: -1, aiIndex: -1)
 
 proc render*(bar: StatusBar, font: Font, bounds: Rect) =
   fillRect(bounds, currentTheme.getColor(tcSurface))

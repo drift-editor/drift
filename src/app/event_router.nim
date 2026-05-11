@@ -18,6 +18,7 @@ proc consume*(gi: GlobalInput): bool =
 proc isConsumed*(gi: GlobalInput): bool = gi.consumed
 
 proc dispatchMouse*(gi: GlobalInput, root: Node, kind: MouseEventKind): bool =
+  if gi == nil or root == nil: return false
   if gi.consumed: return false
   let target = hitTest(root, gi.mouseX, gi.mouseY)
   let handled = bubbleMouse(target, gi.lastEvent, kind)
@@ -26,6 +27,7 @@ proc dispatchMouse*(gi: GlobalInput, root: Node, kind: MouseEventKind): bool =
   handled
 
 proc dispatchKeyboard*(gi: GlobalInput, root: Node, commands: CommandRegistry): bool =
+  if gi == nil or root == nil or commands == nil: return false
   if gi.consumed or gi.lastEvent.kind != KeyDownEvent:
     return false
   # 1. Focused node

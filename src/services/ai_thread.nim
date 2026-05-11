@@ -2,7 +2,7 @@
 ## Communicates with Kimi Code CLI via ACP (Agent Communication Protocol)
 ## ACP is JSON-RPC 2.0 over stdio.
 
-import std/[options, json, os, osproc, strutils, streams]
+import std/[options, json, os, osproc, strutils, streams, atomics]
 when defined(windows):
   import std/winlean
 else:
@@ -33,7 +33,7 @@ type
     reqChan: SPSChannel[AIMessage]
     respChan: SPSChannel[AIMessage]
     thread: Thread[AIThread]
-    isReady*: bool
+    isReady*: Atomic[bool]
     workspaceRoot*: string
 
 proc sendResponse(t: AIThread, msg: AIMessage) {.inline.} =
@@ -56,10 +56,20 @@ proc blockingRead(fd: FileHandle): string =
       result = newString(bytesRead.int)
       copyMem(addr result[0], addr buf[0], bytesRead.int)
   else:
-    let n = posix.read(fd.int32, addr buf[0], 4096)
-    if n > 0:
-      result = newString(n)
-      copyMem(addr result[0], addr buf[0], n)
+    while true:
+      let n = posix.read(fd.int32, addr buf[0], 4096)
+      if n > 0:
+        result = newString(n)
+        copyMem(addr result[0], addr buf[0], n)
+        return
+      elif n == 0:
+        return ""
+      else:
+        let err = errno
+        if err == EAGAIN or err == EINTR:
+          continue
+        stderr.writeLine("[ai-thread] read error, errno=" & $err)
+        return ""
 
 type
   ReaderThreadArgs = object
@@ -101,7 +111,8 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
   of "fs/read_text_file":
     let path = params{"path"}.getStr()
     let absPath = absolutePath(path)
-    if not absPath.startsWith(t.workspaceRoot):
+    let root = normalizePathEnd($t.workspaceRoot, trailingSep = true)
+    if not absPath.startsWith(root):
       sendJsonRpcError(p, reqId, -32000, "Access denied: path outside workspace")
     elif fileExists(absPath):
       try:
@@ -116,7 +127,8 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
     let path = params{"path"}.getStr()
     let content = params{"content"}.getStr()
     let absPath = absolutePath(path)
-    if not absPath.startsWith(t.workspaceRoot):
+    let root = normalizePathEnd($t.workspaceRoot, trailingSep = true)
+    if not absPath.startsWith(root):
       sendJsonRpcError(p, reqId, -32000, "Access denied: path outside workspace")
     else:
       try:
@@ -129,7 +141,8 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
   of "fs/list_directory":
     let path = params{"path"}.getStr()
     let absPath = absolutePath(path)
-    if not absPath.startsWith(t.workspaceRoot):
+    let root = normalizePathEnd($t.workspaceRoot, trailingSep = true)
+    if not absPath.startsWith(root):
       sendJsonRpcError(p, reqId, -32000, "Access denied: path outside workspace")
     elif dirExists(absPath):
       try:
@@ -217,6 +230,8 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
 #  Templates / helpers shared by init, session creation, and the main loop
 # ---------------------------------------------------------------------------
 
+const MaxLineBuffer = 1_000_000
+
 template drainReader(chan: SPSChannel[string], buf: var string, body: untyped) =
   ## Read everything currently waiting on ``chan``, split into lines, and
   ## execute ``body`` for each complete line (``j`` is injected as the parsed
@@ -225,15 +240,36 @@ template drainReader(chan: SPSChannel[string], buf: var string, body: untyped) =
   while channel_spsc.tryReceive(chan, data):
     if data.len == 0: continue
     buf &= data
-    var lines = buf.split('\n')
-    buf = lines.pop()
-    for line in lines:
-      if line.len == 0: continue
-      try:
-        let j {.inject.} = parseJson(line)
-        body
-      except CatchableError as e:
-        stderr.writeLine("[ai-thread] parse error: " & e.msg & " | line: " & line[0..min(80, line.len-1)])
+    if buf.len > MaxLineBuffer:
+      # Find the last newline within the safe window so we don't split mid-line
+      let lastNl = buf.rfind('\n', 0, MaxLineBuffer - 1)
+      if lastNl >= 0:
+        let safe = buf[0..lastNl]
+        buf = buf[lastNl + 1..^1]
+        var lines = safe.split('\n')
+        # safe ends with '\n', so pop() yields "" which we discard
+        discard lines.pop()
+        for line in lines:
+          if line.len == 0: continue
+          try:
+            let j {.inject.} = parseJson(line)
+            body
+          except CatchableError as e:
+            stderr.writeLine("[ai-thread] parse error: " & e.msg & " | line: " & line[0..min(80, line.len-1)])
+      else:
+        # No newline found in first 1MB — runaway line. Log and discard head.
+        stderr.writeLine("[ai-thread] WARNING: runaway line exceeds " & $MaxLineBuffer & " bytes, discarding head")
+        buf = buf[MaxLineBuffer..^1]
+    else:
+      var lines = buf.split('\n')
+      buf = lines.pop()
+      for line in lines:
+        if line.len == 0: continue
+        try:
+          let j {.inject.} = parseJson(line)
+          body
+        except CatchableError as e:
+          stderr.writeLine("[ai-thread] parse error: " & e.msg & " | line: " & line[0..min(80, line.len-1)])
 
 proc handleAgentJson(t: AIThread, p: Process, j: JsonNode,
                      sessionId: var string, sessionDone: var bool,
@@ -309,6 +345,11 @@ proc aiThreadProc(t: AIThread) {.thread.} =
 
   template bail(msg: string) =
     t.sendResponse(AIMessage(kind: amkError, error: msg))
+    try:
+      p.terminate()
+      p.close()
+    except CatchableError:
+      discard
     readerChan.close()
     joinThread(readerThread)
     return
@@ -326,7 +367,7 @@ proc aiThreadProc(t: AIThread) {.thread.} =
     drainReader(readerChan, lineBuffer):
       if j.hasKey("result") and j.hasKey("id"):
         initDone = true
-        t.isReady = true
+        t.isReady.store(true, moRelease)
         t.sendResponse(AIMessage(kind: amkReady))
       elif j.hasKey("error") and j.hasKey("id"):
         bail("ACP init failed: " & j["error"]["message"].getStr())
@@ -360,6 +401,10 @@ proc aiThreadProc(t: AIThread) {.thread.} =
     if channel_spsc.tryReceive(t.reqChan, reqMsg):
       case reqMsg.kind
       of amkSendMessage:
+        # Drain any stale chunks from previous cancelled turn
+        var staleData: string
+        while channel_spsc.tryReceive(readerChan, staleData):
+          discard
         let reqId = nextId
         nextId = sendJsonRpc(p, nextId, "session/prompt", %*{
           "sessionId": sessionId,
@@ -379,6 +424,7 @@ proc aiThreadProc(t: AIThread) {.thread.} =
       of amkShutdown:
         try:
           p.terminate()
+          p.close()
         except CatchableError:
           discard
         break
@@ -405,9 +451,9 @@ proc newAIThread*(): AIThread =
   result = AIThread(
     reqChan: newSPSChannel[AIMessage](64),
     respChan: newSPSChannel[AIMessage](512),
-    isReady: false,
     workspaceRoot: absolutePath(getCurrentDir())
   )
+  result.isReady.store(false, moRelaxed)
   createThread(result.thread, aiThreadProc, result)
 
 proc getResponse*(t: AIThread): Option[AIMessage] =
@@ -416,19 +462,30 @@ proc getResponse*(t: AIThread): Option[AIMessage] =
     return some(msg)
   return none(AIMessage)
 
+proc sendOrWarn[T](c: SPSChannel[T], msg: T, name: string) =
+  var retries = 0
+  while not channel_spsc.trySend(c, msg):
+    if c.isClosed: return
+    if retries < 50:
+      sleep(1)
+      inc retries
+    else:
+      stderr.writeLine("[ai-thread] WARNING: dropped " & name & ", channel full")
+      break
+
 proc sendMessage*(t: AIThread, text: string) =
-  discard channel_spsc.trySend(t.reqChan, AIMessage(kind: amkSendMessage, text: text))
+  sendOrWarn(t.reqChan, AIMessage(kind: amkSendMessage, text: text), "sendMessage")
 
 proc newSession*(t: AIThread) =
-  discard channel_spsc.trySend(t.reqChan, AIMessage(kind: amkNewSession))
+  sendOrWarn(t.reqChan, AIMessage(kind: amkNewSession), "newSession")
 
 proc clearSession*(t: AIThread) =
-  discard channel_spsc.trySend(t.reqChan, AIMessage(kind: amkClearSession))
+  sendOrWarn(t.reqChan, AIMessage(kind: amkClearSession), "clearSession")
 
 proc cancel*(t: AIThread) =
-  discard channel_spsc.trySend(t.reqChan, AIMessage(kind: amkCancel))
+  sendOrWarn(t.reqChan, AIMessage(kind: amkCancel), "cancel")
 
 proc shutdown*(t: AIThread) =
-  discard channel_spsc.trySend(t.reqChan, AIMessage(kind: amkShutdown))
+  sendOrWarn(t.reqChan, AIMessage(kind: amkShutdown), "shutdown")
   t.respChan.close()
   t.reqChan.close()

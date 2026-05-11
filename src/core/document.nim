@@ -4,7 +4,7 @@
 import std/[strutils, algorithm, unicode, times, strformat]
 import types, errors
 import ../utils/text
-export errors.Result, errors.ok, errors.err
+export errors.Result, errors.ok, errors.err, errors.isOk, errors.isErr
 
 # Construction
 
@@ -108,8 +108,6 @@ proc getFullText*(doc: Document): string =
     of leCrLf: "\r\n"
     of leCr: "\r"
   result = doc.lines.join(sep)
-  if doc.hasTrailingNewline:
-    result.add(sep)
 
 proc getCharacterCount*(doc: Document): int =
   var count = 0
@@ -283,16 +281,14 @@ proc undo*(doc: Document): Result[CursorPos] =
       edit.content.lastLineLen + edit.position.col
     
     let endPos = CursorPos(line: endLine, col: endCol)
-    discard doc.deleteRange(edit.position, endPos)
-    # Remove the undo record created by deleteRange
-    if doc.undoStack.len > 0:
+    let delResult = doc.deleteRange(edit.position, endPos)
+    if delResult.isOk and doc.undoStack.len > 0:
       doc.undoStack.del(doc.undoStack.high)
   
   of eoDelete:
     # Undo delete = insert
-    discard doc.insertText(edit.position, edit.previousContent)
-    # Remove the undo record created by insertText
-    if doc.undoStack.len > 0:
+    let insResult = doc.insertText(edit.position, edit.previousContent)
+    if insResult.isOk and doc.undoStack.len > 0:
       doc.undoStack.del(doc.undoStack.high)
   
   of eoReplace:
@@ -305,12 +301,12 @@ proc undo*(doc: Document): Result[CursorPos] =
       edit.content.lastLineLen + edit.position.col
     let endPos = CursorPos(line: endLine, col: endCol)
 
-    discard doc.deleteRange(edit.position, endPos)
-    if doc.undoStack.len > 0:
+    let delResult = doc.deleteRange(edit.position, endPos)
+    if delResult.isOk and doc.undoStack.len > 0:
       doc.undoStack.del(doc.undoStack.high)
 
-    discard doc.insertText(edit.position, edit.previousContent)
-    if doc.undoStack.len > 0:
+    let insResult = doc.insertText(edit.position, edit.previousContent)
+    if insResult.isOk and doc.undoStack.len > 0:
       doc.undoStack.del(doc.undoStack.high)
 
   doc.redoStack.add(edit)

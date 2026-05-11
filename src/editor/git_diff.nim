@@ -1,4 +1,5 @@
 import std/[osproc, strutils, os]
+import ../services/git as gitcmd
 
 type
   DiffLine* = tuple[line: int, kind: char]
@@ -12,29 +13,38 @@ proc parseHunkHeader(header: string): tuple[oldStart, oldCount, newStart, newCou
   let parts = inner.splitWhitespace()
   if parts.len < 2: return
 
-  template parsePart(s: string, outStart, outCount: int) =
+  proc parsePart(s: string, outStart, outCount: var int): bool =
     let withoutSign = s[1..^1]
     let commaIdx = withoutSign.find(',')
-    if commaIdx >= 0:
-      outStart = parseInt(withoutSign[0..<commaIdx])
-      outCount = parseInt(withoutSign[commaIdx + 1..^1])
-    else:
-      outStart = parseInt(withoutSign)
-      outCount = 1
+    try:
+      if commaIdx >= 0:
+        outStart = parseInt(withoutSign[0..<commaIdx])
+        outCount = parseInt(withoutSign[commaIdx + 1..^1])
+      else:
+        outStart = parseInt(withoutSign)
+        outCount = 1
+      return true
+    except ValueError:
+      return false
 
   if parts[0].startsWith("-"):
-    parsePart(parts[0], result.oldStart, result.oldCount)
+    if not parsePart(parts[0], result.oldStart, result.oldCount): return
   if parts[1].startsWith("+"):
-    parsePart(parts[1], result.newStart, result.newCount)
+    if not parsePart(parts[1], result.newStart, result.newCount): return
 
 proc getDiffLines*(path: string): seq[DiffLine] =
   result = @[]
   if path.len == 0 or not fileExists(path):
     return
 
-  let dir = path.parentDir()
-  let cmd = "git diff -U0 --no-color -- " & path.extractFilename().quoteShell()
-  let (output, exitCode) = execCmdEx(cmd, workingDir = dir)
+  let repoRoot = gitcmd.getRepoRoot(path)
+  if repoRoot.len == 0:
+    return
+  let absPath = expandFilename(path)
+  let absRepo = expandFilename(repoRoot)
+  let relPath = relativePath(absPath, absRepo)
+  let cmd = "git diff -U0 --no-color -- " & relPath.quoteShell()
+  let (output, exitCode) = execCmdEx(cmd, workingDir = absRepo)
   if exitCode != 0 or output.len == 0:
     return
 
@@ -46,7 +56,7 @@ proc getDiffLines*(path: string): seq[DiffLine] =
   for line in splitLines(output):
     if line.startsWith("@@"):
       for d in pendingDeletions:
-        result.add((d, 'D'))
+        result.add((d - 1, 'D'))
       pendingDeletions.setLen(0)
       let (os, _, ns, _) = parseHunkHeader(line)
       oldLineNum = os

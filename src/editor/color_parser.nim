@@ -156,7 +156,8 @@ const colorNames = [
 ].toTable
 
 proc parseHex*(hex: string): Color =
-  assert hex.len == 6
+  if hex.len != 6:
+    raise newException(ColorParseError, "Expected 6 hex chars, got " & $hex.len)
   let r = parseHexInt(hex[0..1]).uint8
   let g = parseHexInt(hex[2..3]).uint8
   let b = parseHexInt(hex[4..5]).uint8

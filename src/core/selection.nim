@@ -53,7 +53,7 @@ proc getSelectedText*(sel: Selection, lines: seq[string]): string =
     # Single line selection
     if start.line >= 0 and start.line < lines.len:
       let line = lines[start.line]
-      if start.col <= line.len and finish.col <= line.len:
+      if start.col >= 0 and finish.col >= 0 and start.col <= line.len and finish.col <= line.len:
         return line[start.col ..< finish.col]
     return ""
   
@@ -66,7 +66,7 @@ proc getSelectedText*(sel: Selection, lines: seq[string]): string =
     let line = lines[lineNum]
     if lineNum == start.line:
       # First line - from start column to end
-      if start.col <= line.len:
+      if start.col >= 0 and start.col <= line.len:
         selectedText.add(line[start.col .. ^1])
     elif lineNum == finish.line:
       # Last line - from beginning to end column
@@ -109,7 +109,7 @@ proc collapseToEnd*(sel: var Selection) =
 
 proc selectAll*(sel: var Selection, lineCount: int, getLineLen: proc(line: int): int) =
   ## Select entire document
-  if lineCount == 0:
+  if lineCount <= 0:
     sel.collapseTo(CursorPos(line: 0, col: 0))
     return
   
@@ -122,6 +122,8 @@ proc selectAll*(sel: var Selection, lineCount: int, getLineLen: proc(line: int):
 
 proc selectLine*(sel: var Selection, lineNum: int, getLineLen: proc(line: int): int) =
   ## Select entire line (without line ending)
+  if lineNum < 0:
+    return
   let lineLen = getLineLen(lineNum)
   sel.anchor = CursorPos(line: lineNum, col: 0)
   sel.caret = CursorPos(line: lineNum, col: lineLen)

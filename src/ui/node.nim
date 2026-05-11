@@ -42,10 +42,12 @@ proc setCursorResolver*(node: Node, resolver: proc(n: Node, x, y: int): CursorKi
   node.cursorResolver = resolver
 
 proc addChild*(parent, child: Node) =
+  if parent == nil or child == nil: return
   child.parent = parent
   parent.children.add(child)
 
 proc hitTest*(root: Node, x, y: int): Node =
+  if root == nil: return nil
   if not root.visible or not root.bounds.contains(point(x, y)):
     return nil
   # Front-to-back within children: sort by descending zIndex for hit-test
@@ -82,6 +84,7 @@ proc bubbleMouse*(target: Node, e: Event, kind: MouseEventKind): bool =
   false
 
 proc findFocused*(root: Node): Node =
+  if root == nil: return nil
   if not root.visible:
     return nil
   if root.focus:
@@ -93,6 +96,7 @@ proc findFocused*(root: Node): Node =
   nil
 
 proc dump*(root: Node, indent: int = 0) =
+  if root == nil: return
   let prefix = spaces(indent * 2)
   stderr.writeLine(prefix & root.id & " z=" & $root.zIndex & " visible=" & $root.visible & " bounds=" & $root.bounds)
   for child in root.children:

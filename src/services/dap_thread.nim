@@ -1,4 +1,5 @@
 import std/[options, json, os]
+import std/atomics
 import ../channel_spsc
 import chronos
 import dap_client
@@ -41,7 +42,7 @@ type
     reqChan: SPSChannel[DAPMessage]
     respChan: SPSChannel[DAPMessage]
     thread: Thread[DAPThread]
-    isReady*: bool
+    isReady*: Atomic[bool]
 
 proc sendResponse(t: DAPThread, msg: DAPMessage) {.inline.} =
   if not t.respChan.isClosed and not channel_spsc.trySend(t.respChan, msg):
@@ -75,7 +76,7 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
             terminatedBuffer.add(0)
           )
           client.ensureReadLoop()
-          t.isReady = true
+          t.isReady.store(true, moRelease)
           t.sendResponse(DAPMessage(kind: dmkReady, str1: "Ready"))
         else:
           t.sendResponse(DAPMessage(kind: dmkError, str1: client.errorMsg))
