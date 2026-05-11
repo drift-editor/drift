@@ -531,7 +531,10 @@ proc render*(explorer: FileExplorer, bounds: Rect, font: Font) =
   let headerBounds = rect(bounds.x, bounds.y, bounds.w, HEADER_HEIGHT)
   fillRect(headerBounds, currentTheme.getColor(tcSurface))
 
-  let headerText = if explorer.rootPath.len > 0: extractFilename(explorer.rootPath) else: "Explorer"
+  var headerPath = explorer.rootPath
+  while headerPath.len > 0 and headerPath[^1] in {'/', '\\'}:
+    headerPath.setLen(headerPath.len - 1)
+  let headerText = if headerPath.len > 0: extractFilename(headerPath) else: "Explorer"
   discard drawText(font, bounds.x + PADDING, bounds.y + 6, headerText,
                    currentTheme.getColor(tcText), color(0, 0, 0, 0))
 
