@@ -203,7 +203,7 @@ proc render*(bar: TabBar, font: Font, bounds: Rect) =
     if tab.bounds.x + tab.bounds.w < bar.bounds.x or tab.bounds.x > bar.bounds.x + bar.bounds.w:
       continue
 
-    let tabBg = if tab.isActive: surfaceColor else: bgColor
+    let tabBg = if tab.isActive: bgColor else: surfaceColor
     fillRect(tab.bounds, tabBg)
 
     if tab.isActive:
