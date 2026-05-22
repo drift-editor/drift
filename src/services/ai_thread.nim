@@ -52,7 +52,7 @@ proc blockingRead(fd: FileHandle): string =
   var buf: array[4096, char]
   when defined(windows):
     var bytesRead: DWORD
-    if ReadFile(fd, addr buf[0], 4096.DWORD, addr bytesRead, nil).bool and bytesRead > 0:
+    if winlean.readFile(fd, addr buf[0], 4096.DWORD, addr bytesRead, nil).bool and bytesRead > 0:
       result = newString(bytesRead.int)
       copyMem(addr result[0], addr buf[0], bytesRead.int)
   else:
