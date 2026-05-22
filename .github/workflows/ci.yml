@@ -47,10 +47,11 @@ jobs:
       - name: Install dependencies
         run: nimble install -d -y
 
+      - name: Setup nimble paths
+        run: nimble setup
+
       - name: Build
-        run: |
-          rm -f nimble.paths
-          nimble build -d:release -y
+        run: nimble build -d:release -y
 
       - name: Detect arch
         id: arch
