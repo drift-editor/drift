@@ -48,7 +48,7 @@ jobs:
         run: nimble install -d -y
 
       - name: Build
-        run: nim c src/drift.nim
+        run: nimble build -d:release -y
 
       - name: Detect arch
         id: arch
@@ -63,10 +63,10 @@ jobs:
         run: |
           OS=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
           if [ "$OS" = "windows" ]; then
-            mv src/drift.exe "drift-${OS}-${{ steps.arch.outputs.arch }}.exe"
+            mv drift.exe "drift-${OS}-${{ steps.arch.outputs.arch }}.exe"
             echo "filename=drift-${OS}-${{ steps.arch.outputs.arch }}.exe" >> $GITHUB_OUTPUT
           else
-            mv src/drift "drift-${OS}-${{ steps.arch.outputs.arch }}"
+            mv drift "drift-${OS}-${{ steps.arch.outputs.arch }}"
             echo "filename=drift-${OS}-${{ steps.arch.outputs.arch }}" >> $GITHUB_OUTPUT
           fi
 
