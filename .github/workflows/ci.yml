@@ -49,3 +49,29 @@ jobs:
 
       - name: Build
         run: nim c src/drift.nim
+
+      - name: Detect arch
+        id: arch
+        shell: bash
+        run: |
+          ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          echo "arch=$ARCH" >> $GITHUB_OUTPUT
+
+      - name: Rename binary
+        id: rename
+        shell: bash
+        run: |
+          OS=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
+          if [ "$OS" = "windows" ]; then
+            mv src/drift.exe "drift-${OS}-${{ steps.arch.outputs.arch }}.exe"
+            echo "filename=drift-${OS}-${{ steps.arch.outputs.arch }}.exe" >> $GITHUB_OUTPUT
+          else
+            mv src/drift "drift-${OS}-${{ steps.arch.outputs.arch }}"
+            echo "filename=drift-${OS}-${{ steps.arch.outputs.arch }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-${{ runner.os }}-${{ steps.arch.outputs.arch }}
+          path: ${{ steps.rename.outputs.filename }}
