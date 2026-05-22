@@ -48,7 +48,9 @@ jobs:
         run: nimble install -d -y
 
       - name: Build
-        run: nimble build -d:release -y
+        run: |
+          rm -f nimble.paths
+          nimble build -d:release -y
 
       - name: Detect arch
         id: arch
