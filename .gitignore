@@ -17,6 +17,7 @@ nimcache
 !.github/
 *.dll
 __pycache__
+*.dSYM/
 bindings/generated
 /config.json
 /config.default.json
