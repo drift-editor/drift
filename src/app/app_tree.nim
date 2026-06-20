@@ -252,7 +252,7 @@ template buildEditorRoot*(app, layout): Node =
       discard app.aiPanel.handleMouse(e, n.bounds)
       true
     aiNode.setCursorResolver(proc(n: Node, x, y: int): CursorKind =
-      if app.aiPanel.hoverNewChat or app.aiPanel.hoverClear: curHand
+      if app.aiPanel.hoverNewChat or app.aiPanel.hoverStop: curHand
       else: curIbeam)
     root.addChild(aiNode)
 
@@ -287,6 +287,11 @@ template buildEditorRoot*(app, layout): Node =
     aiNode.zIndex = 5
     aiNode.onMouseDown = proc(n: Node, e: Event): bool =
       app.aiPanelVisible = not app.aiPanelVisible
+      if app.aiPanelVisible:
+        app.focus = "aiPanel"
+        app.aiPanel.focused = true
+      elif app.focus == "aiPanel":
+        app.focus = "editor"
       true
     aiNode.setCursorStyle(curHand)
     statusNode.addChild(aiNode)

@@ -86,6 +86,11 @@ template initCommands*(app: untyped): untyped =
     app.commands.bindKey({CtrlPressed, ShiftPressed}, KeyA, "view.toggleAIPanel")
     app.commands.register("view.toggleAIPanel") do ():
       app.aiPanelVisible = not app.aiPanelVisible
+      if app.aiPanelVisible:
+        app.focus = "aiPanel"
+        app.aiPanel.focused = true
+      elif app.focus == "aiPanel":
+        app.focus = "editor"
 
     # Command palette
     app.commands.bindKey({CtrlPressed, ShiftPressed}, KeyP, "workbench.showCommands")

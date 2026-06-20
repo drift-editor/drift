@@ -1,7 +1,7 @@
 ## Configuration loader
 ## Loads user settings from ~/.config/drift/config.json
 
-import std/[os, json]
+import std/[os, json, strutils]
 
 type
   AppConfig* = object
@@ -78,6 +78,12 @@ proc loadConfig*(): AppConfig =
       result.aiBaseUrl = j["aiBaseUrl"].getStr()
   except CatchableError:
     discard
+
+proc aiDisplayName*(config: AppConfig): string =
+  ## Human-readable name for the active AI provider.
+  if config.aiProvider.len > 0:
+    return config.aiProvider.capitalizeAscii()
+  return "Kimi"
 
 proc saveConfig*(config: AppConfig) =
   createDir(configDir())

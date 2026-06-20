@@ -21,6 +21,13 @@ type
     role*: string
     content*: string
 
+  BubbleLayout = object
+    x, y, w, h: int
+    textColor: Color
+    bgColor: Color
+    wrappedLines: seq[string]
+    messageIndex: int
+
   AIPanel* = ref object
     messages*: seq[ChatMessage]
     inputText*: string
@@ -34,10 +41,12 @@ type
     onNewSession*: proc()
     onStop*: proc()
     hoverNewChat*: bool
-    hoverClear*: bool
     hoverStop*: bool
+    placeholder*: string
+    userScrolledUp*: bool
+    rightClickedMessageIndex*: int
 
-proc newAIPanel*(): AIPanel =
+proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
   AIPanel(
     messages: @[],
     inputText: "",
@@ -51,8 +60,10 @@ proc newAIPanel*(): AIPanel =
     onNewSession: nil,
     onStop: nil,
     hoverNewChat: false,
-    hoverClear: false,
-    hoverStop: false
+    hoverStop: false,
+    placeholder: placeholder,
+    userScrolledUp: false,
+    rightClickedMessageIndex: -1
   )
 
 proc sendCurrentMessage*(panel: AIPanel) =
@@ -64,6 +75,7 @@ proc sendCurrentMessage*(panel: AIPanel) =
   panel.cursorPos = 0
   panel.cursorVisible = true
   panel.lastBlinkTick = getTicks()
+  panel.userScrolledUp = false
   if panel.onSend != nil:
     panel.onSend(text)
 
@@ -73,6 +85,8 @@ proc clearChat*(panel: AIPanel) =
   panel.isStreaming = false
   panel.inputText = ""
   panel.cursorPos = 0
+  panel.userScrolledUp = false
+  panel.rightClickedMessageIndex = -1
 
 proc appendText*(panel: AIPanel, chunk: string) =
   panel.isStreaming = true
@@ -80,6 +94,8 @@ proc appendText*(panel: AIPanel, chunk: string) =
     panel.messages.add(ChatMessage(role: "assistant", content: chunk))
   else:
     panel.messages[^1].content &= chunk
+  if not panel.userScrolledUp:
+    panel.scrollOffset = high(int)  ## Will be clamped to bottom during render
 
 proc finalizeMessage*(panel: AIPanel) =
   panel.isStreaming = false
@@ -89,6 +105,31 @@ proc lastMessageContent*(panel: AIPanel): string =
     panel.messages[^1].content
   else:
     ""
+
+proc copyLastAssistantMessage*(panel: AIPanel): bool =
+  ## Copy the last assistant message to the clipboard.
+  for i in countdown(panel.messages.high, 0):
+    if panel.messages[i].role == "assistant":
+      putClipboardText(panel.messages[i].content)
+      return true
+  return false
+
+proc copyMessageAt*(panel: AIPanel, index: int): bool =
+  if index >= 0 and index < panel.messages.len:
+    putClipboardText(panel.messages[index].content)
+    return true
+  return false
+
+proc bubbleTextColorFor(bg: Color): Color =
+  ## Choose white or near-black text depending on accent luminance.
+  let r = bg.r.float
+  let g = bg.g.float
+  let b = bg.b.float
+  let luminance = 0.299 * r + 0.587 * g + 0.114 * b
+  if luminance > 140:
+    color(0, 0, 0, 255)
+  else:
+    color(255, 255, 255, 255)
 
 proc wrapTextToWidth(text: string, font: Font, maxW: int): seq[string] =
   if text.len == 0:
@@ -126,13 +167,12 @@ proc cursorVisualPos(text: string, cursorPos: int, font: Font, maxW: int): tuple
         let lineEnd = charIdx + currentLine.len
         if cursorPos >= lineStart and cursorPos <= lineEnd:
           let offsetInLine = cursorPos - lineStart
+          if offsetInLine <= 0 or offsetInLine > currentLine.len:
+            return (lineIdx, 0)
           return (lineIdx, font.measureText(currentLine[0..<offsetInLine]).w)
-        # Advance charIdx by the actual characters consumed in original text
-        # currentLine may consist of multiple words separated by single spaces
-        # We need to find how many chars in rawLine correspond to currentLine
         charIdx += currentLine.len
-        if currentLine.len < rawLine.len:
-          charIdx += 1  # skip one space
+        if charIdx < text.len and text[charIdx] == ' ':
+          charIdx += 1
         lineIdx += 1
         currentLine = word
       else:
@@ -142,12 +182,12 @@ proc cursorVisualPos(text: string, cursorPos: int, font: Font, maxW: int): tuple
     let lineEnd = charIdx + currentLine.len
     if cursorPos >= lineStart and cursorPos <= lineEnd:
       let offsetInLine = cursorPos - lineStart
-      if offsetInLine <= 0:
+      if offsetInLine <= 0 or offsetInLine > currentLine.len:
         return (lineIdx, 0)
       return (lineIdx, font.measureText(currentLine[0..<offsetInLine]).w)
     charIdx += currentLine.len
     if charIdx < text.len and text[charIdx] == '\n':
-      charIdx += 1  # skip newline
+      charIdx += 1
     lineIdx += 1
   # Cursor at end
   let allLines = wrapTextToWidth(text, font, maxW)
@@ -174,8 +214,10 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
       panel.sendCurrentMessage()
       return true
   of KeyEsc:
-    panel.focused = false
-    return true
+    if panel.focused:
+      panel.focused = false
+      return true
+    return false
   of KeyBackspace:
     if panel.cursorPos > 0:
       if panel.cursorPos < panel.inputText.len:
@@ -231,6 +273,15 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
         panel.lastBlinkTick = getTicks()
         return true
     return false
+  of KeyC:
+    if CtrlPressed in e.mods and ShiftPressed in e.mods:
+      discard panel.copyLastAssistantMessage()
+      return true
+  of KeyPeriod:
+    if CtrlPressed in e.mods and panel.isStreaming:
+      if panel.onStop != nil:
+        panel.onStop()
+      return true
   else:
     discard
   false
@@ -287,6 +338,7 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
       panel.cursorVisible = true
       panel.lastBlinkTick = getTicks()
     else:
+      # Clicking messages area defocuses input but does not steal panel focus
       panel.focused = false
     return true
 
@@ -304,11 +356,74 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
     return true
 
   if e.kind == MouseWheelEvent:
+    let oldOffset = panel.scrollOffset
     panel.scrollOffset += e.y * 20
     if panel.scrollOffset < 0:
       panel.scrollOffset = 0
-    return true
+    # userScrolledUp is determined at render time after clamping to content height
+    if panel.scrollOffset != oldOffset:
+      return true
   false
+
+proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleLayout] =
+  let maxW = min(MaxMessageWidth, bounds.w - 32)
+  let fm = font.getFontMetrics()
+  var y = MessagePadding
+  for i, msg in panel.messages:
+    let isUser = msg.role == "user"
+    let bgColor = if isUser: currentTheme.getColor(tcAccent) else: currentTheme.getColor(tcBackground)
+
+    let lines = msg.content.splitLines()
+    var wrappedLines: seq[string]
+    var totalH = 0
+    for line in lines:
+      let ext = font.measureText(line)
+      if ext.w <= maxW:
+        wrappedLines.add(line)
+        totalH += fm.lineHeight
+      else:
+        var currentLine = ""
+        for word in line.split(' '):
+          let test = if currentLine.len > 0: currentLine & " " & word else: word
+          let testW = font.measureText(test).w
+          if testW > maxW and currentLine.len > 0:
+            wrappedLines.add(currentLine)
+            totalH += fm.lineHeight
+            currentLine = word
+          else:
+            currentLine = test
+        if currentLine.len > 0:
+          wrappedLines.add(currentLine)
+          totalH += fm.lineHeight
+
+    let bubbleH = totalH + MessagePadding * 2
+    let bubbleW = min(bounds.w - 16, maxW + MessagePadding * 2)
+    let bubbleX = if isUser:
+      bounds.x + bounds.w - bubbleW - MessagePadding
+    else:
+      bounds.x + MessagePadding
+
+    result.add(BubbleLayout(
+      x: bubbleX, y: y, w: bubbleW, h: bubbleH,
+      textColor: bubbleTextColorFor(bgColor),
+      bgColor: bgColor,
+      wrappedLines: wrappedLines,
+      messageIndex: i
+    ))
+    y += bubbleH + MessageGap
+
+proc messageIndexAt*(panel: AIPanel, y: int, font: Font, bounds: Rect): int =
+  ## Return the message index at the given screen Y, or -1.
+  let messagesY = bounds.y + HeaderHeight
+  let messagesH = max(0, bounds.h - HeaderHeight - InputHeight)
+  if y < messagesY or y >= messagesY + messagesH:
+    return -1
+  let layouts = computeBubbleLayouts(panel, font, bounds)
+  let contentY = y - messagesY + panel.scrollOffset
+  for bubble in layouts:
+    if contentY >= bubble.y and contentY < bubble.y + bubble.h:
+      return bubble.messageIndex
+  return -1
 
 proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   let bg = currentTheme.getColor(tcSurface)
@@ -317,6 +432,7 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   let textMuted = currentTheme.getColor(tcTextSecondary)
   let accentC = currentTheme.getColor(tcAccent)
   let headerBg = currentTheme.getColor(tcBackground)
+  let fm = font.getFontMetrics()
 
   # Panel background
   fillRect(bounds, bg)
@@ -324,7 +440,6 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   # Header
   fillRect(rect(bounds.x, bounds.y, bounds.w, HeaderHeight), headerBg)
   fillRect(rect(bounds.x, bounds.y + HeaderHeight - 1, bounds.w, 1), borderC)
-  let fm = font.getFontMetrics()
   let headerTextY = bounds.y + (HeaderHeight - fm.lineHeight) div 2
   discard font.drawText(bounds.x + 12, headerTextY, "AI Chat", textC, color(0, 0, 0, 0))
 
@@ -366,66 +481,46 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   # Clip messages area
   setClipRect(messagesBounds)
 
-  var y = messagesY + MessagePadding - panel.scrollOffset
+  # Compute layouts
+  let bubbles = computeBubbleLayouts(panel, font, bounds)
 
-  for msg in panel.messages:
-    let isUser = msg.role == "user"
-    let bubbleColor = if isUser: accentC else: headerBg
-    let bubbleTextC = if isUser: color(255, 255, 255, 255) else: textC
+  # Compute total content height
+  var contentHeight = MessagePadding
+  if bubbles.len > 0:
+    contentHeight = bubbles[^1].y + bubbles[^1].h + MessageGap
+  if panel.isStreaming:
+    contentHeight += fm.lineHeight
 
-    # Measure text and wrap if needed
-    let maxW = min(MaxMessageWidth, bounds.w - 32)
-    let lines = msg.content.splitLines()
-    var wrappedLines: seq[string]
-    var totalH = 0
-    for line in lines:
-      let ext = font.measureText(line)
-      if ext.w <= maxW:
-        wrappedLines.add(line)
-        totalH += fm.lineHeight
-      else:
-        # Simple word wrap
-        var currentLine = ""
-        for word in line.split(' '):
-          let test = if currentLine.len > 0: currentLine & " " & word else: word
-          let testW = font.measureText(test).w
-          if testW > maxW and currentLine.len > 0:
-            wrappedLines.add(currentLine)
-            totalH += fm.lineHeight
-            currentLine = word
-          else:
-            currentLine = test
-        if currentLine.len > 0:
-          wrappedLines.add(currentLine)
-          totalH += fm.lineHeight
+  # Clamp scroll offset to content
+  let maxScroll = max(0, contentHeight - messagesH)
+  if panel.scrollOffset > maxScroll:
+    panel.scrollOffset = maxScroll
+  if panel.scrollOffset < 0:
+    panel.scrollOffset = 0
 
-    let bubbleH = totalH + MessagePadding * 2
-    let bubbleW = min(bounds.w - 16, maxW + MessagePadding * 2)
-    let bubbleX = if isUser:
-      bounds.x + bounds.w - bubbleW - MessagePadding
-    else:
-      bounds.x + MessagePadding
+  # Determine whether user has intentionally scrolled away from the bottom.
+  panel.userScrolledUp = panel.scrollOffset < maxScroll
 
-    if y + bubbleH > messagesY and y < messagesY + messagesH:
-      fillRect(rect(bubbleX, y, bubbleW, bubbleH), bubbleColor)
-      fillRect(rect(bubbleX, y, bubbleW, 1), borderC)
-      fillRect(rect(bubbleX, y + bubbleH - 1, bubbleW, 1), borderC)
-      fillRect(rect(bubbleX, y, 1, bubbleH), borderC)
-      fillRect(rect(bubbleX + bubbleW - 1, y, 1, bubbleH), borderC)
+  # Render visible bubbles
+  for bubble in bubbles:
+    let drawY = messagesY + bubble.y - panel.scrollOffset
+    if drawY + bubble.h > messagesY and drawY < messagesY + messagesH:
+      fillRect(rect(bubble.x, drawY, bubble.w, bubble.h), bubble.bgColor)
+      fillRect(rect(bubble.x, drawY, bubble.w, 1), borderC)
+      fillRect(rect(bubble.x, drawY + bubble.h - 1, bubble.w, 1), borderC)
+      fillRect(rect(bubble.x, drawY, 1, bubble.h), borderC)
+      fillRect(rect(bubble.x + bubble.w - 1, drawY, 1, bubble.h), borderC)
 
-      var lineY = y + MessagePadding
-      for line in wrappedLines:
-        discard font.drawText(bubbleX + MessagePadding, lineY, line, bubbleTextC, color(0, 0, 0, 0))
+      var lineY = drawY + MessagePadding
+      for line in bubble.wrappedLines:
+        discard font.drawText(bubble.x + MessagePadding, lineY, line, bubble.textColor, color(0, 0, 0, 0))
         lineY += fm.lineHeight
-
-    y += bubbleH + MessageGap
 
   # Streaming indicator
   if panel.isStreaming:
-    let indicatorY = y + MessagePadding
+    let indicatorY = messagesY + contentHeight - fm.lineHeight - panel.scrollOffset
     if indicatorY > messagesY and indicatorY < messagesY + messagesH:
-      let dots = "."
-      discard font.drawText(bounds.x + MessagePadding, indicatorY, dots, textMuted, color(0, 0, 0, 0))
+      discard font.drawText(bounds.x + MessagePadding, indicatorY, ".", textMuted, color(0, 0, 0, 0))
 
   restoreState()
 
@@ -451,7 +546,7 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   let inputLines = wrapTextToWidth(panel.inputText, font, innerTextW)
 
   if panel.inputText.len == 0:
-    discard font.drawText(inputBounds.x + 8, inputBounds.y + 8, "Ask Kimi...", textMuted, color(0, 0, 0, 0))
+    discard font.drawText(inputBounds.x + 8, inputBounds.y + 8, panel.placeholder, textMuted, color(0, 0, 0, 0))
   else:
     var lineY = inputBounds.y + 8
     for line in inputLines:

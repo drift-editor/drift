@@ -197,10 +197,10 @@ proc applyTheme*(app: App, name: string) =
   saveConfig(app.config)
 
 proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
-  var app = App(config: config, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel(), debugSessionActive: false, debugStopped: false, debugStopThreadId: 0, breakpoints: @[])
+  var app = App(config: config, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel("Ask " & cfg.aiDisplayName(config) & "..."), debugSessionActive: false, debugStopped: false, debugStopThreadId: 0, breakpoints: @[])
   app.aiPanel.onSend = proc(text: string) =
     if app.aiThread == nil:
-      app.aiThread = newAIThread()
+      app.aiThread = newAIThread(app.config)
     # Build prompt with editor context
     var promptText = text
     if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
@@ -593,11 +593,11 @@ proc reviewChanges*(app: App) =
   prompt.add("3. **Suggestions** — specific improvements with reasoning\n")
   prompt.add("4. **Approval status** — Approve / Request changes / Needs discussion\n")
 
-  discard app.notificationManager.info("Sending " & $allFiles.len & " file(s) for AI review...")
+  discard app.notificationManager.info("Requesting AI review of " & $allFiles.len & " changed file(s)...")
 
   app.aiPanelVisible = true
   if app.aiThread == nil:
-    app.aiThread = newAIThread()
+    app.aiThread = newAIThread(app.config)
   app.aiThread.sendMessage(prompt)
   app.aiPanel.isStreaming = true
   if app.tooltip.visible: app.tooltip.hideTooltip()
@@ -1951,8 +1951,17 @@ proc run*(app: App) =
           let inputY = layout.rightPanel.y + layout.rightPanel.h - 72  # InputHeight
           if e.y >= messagesY and e.y < inputY:
             app.contextMenu.clear()
+            let clickedIdx = app.aiPanel.messageIndexAt(e.y, app.uiFont, layout.rightPanel)
+            if clickedIdx >= 0:
+              app.contextMenu.addItem("copy", "Copy Message", proc() =
+                discard app.aiPanel.copyMessageAt(clickedIdx))
+            app.contextMenu.addItem("copyLast", "Copy Last Message", proc() =
+              discard app.aiPanel.copyLastAssistantMessage())
+            app.contextMenu.addSeparator()
             app.contextMenu.addItem("clear", "Clear Conversation", proc() =
-              app.aiPanel.clearChat())
+              app.aiPanel.clearChat()
+              if app.aiPanel.onNewSession != nil:
+                app.aiPanel.onNewSession())
             app.contextMenu.showAt(e.x, e.y)
             discard app.gi.consume()
         else:
@@ -1970,7 +1979,9 @@ proc run*(app: App) =
         app.sidebarDragStartX = e.x
       if app.aiPanelDragging:
         let delta = app.aiPanelDragStartX - e.x
-        app.aiPanelWidth = clamp(app.aiPanelWidth + delta, 200, app.width - 200)
+        const minEditorWidth = 400
+        let maxPanelWidth = max(200, app.width - minEditorWidth)
+        app.aiPanelWidth = clamp(app.aiPanelWidth + delta, 200, maxPanelWidth)
         app.aiPanelDragStartX = e.x
       if app.terminalDragging:
         let delta = app.terminalDragStartY - e.y
@@ -2244,7 +2255,10 @@ proc run*(app: App) =
           stderr.writeLine("[app] AI error: " & resp.error)
           app.aiPanel.appendText("Error: " & resp.error)
           app.aiPanel.finalizeMessage()
+          app.aiPanel.isStreaming = false
           discard app.notificationManager.error("AI: " & resp.error)
+          # Thread has exited or is unusable; clear it so the next send creates a fresh one.
+          app.aiThread = nil
         else:
           discard
 
