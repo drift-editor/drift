@@ -372,7 +372,7 @@ proc getCategoryIcon(category: CommandCategory): IconId =
   of ccSearch: iiSearch
   of ccGit: iiGitBranch
   of ccTools: iiGear
-  of ccDebug: iiGear
+  of ccDebug: iiBug
   of ccHelp: iiNone
 
 proc render*(palette: CommandPalette, font: Font, viewport: Rect) =

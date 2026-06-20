@@ -6,6 +6,7 @@ import uirelays
 import uirelays/screen
 import uirelays/input
 import theme, icons
+import ../core/debug_types
 
 const
   SectionHeaderHeight = 26
@@ -13,20 +14,8 @@ const
   ButtonHeight = 32
 
 type
-  StackFrame* = object
-    id*: int
-    name*: string
-    source*: string
-    line*: int
-    column*: int
-
-  Breakpoint* = object
-    path*: string
-    line*: int
-    enabled*: bool
-
   DebugSidebar* = ref object
-    status*: string
+    state*: DebugSessionState
     frames*: seq[StackFrame]
     breakpoints*: seq[Breakpoint]
     hoverRow*: int
@@ -44,7 +33,7 @@ type
 
 proc newDebugSidebar*(): DebugSidebar =
   DebugSidebar(
-    status: "Not started",
+    state: dssOff,
     frames: @[],
     breakpoints: @[],
     hoverRow: -1,
@@ -52,7 +41,7 @@ proc newDebugSidebar*(): DebugSidebar =
   )
 
 proc clear*(panel: DebugSidebar) =
-  panel.status = "Not started"
+  panel.state = dssOff
   panel.frames = @[]
   panel.hoverRow = -1
 
@@ -71,8 +60,8 @@ proc render*(panel: DebugSidebar; bounds: Rect; font: Font) =
 
   var y = bounds.y + 4
 
-  let isRunning = panel.status == "Running"
-  let isStopped = panel.status == "Stopped"
+  let isRunning = panel.state == dssRunning
+  let isStopped = panel.state == dssStopped
 
   # Start / Continue button (status-bar-style: distinct bg + hover pill)
   let runLabel = if isRunning: "Continue" elif isStopped: "Continue" else: "Run and Debug"
@@ -95,8 +84,8 @@ proc render*(panel: DebugSidebar; bounds: Rect; font: Font) =
   discard drawText(font, runBtnX + 28, y + (ButtonHeight - font.getFontMetrics().lineHeight) div 2 + 1,
                    runLabel, textC, color(0, 0, 0, 0))
 
-  # Stop button (only when running or stopped)
-  if isRunning or isStopped:
+  # Stop button (only when session is active)
+  if panel.state.isActive:
     let stopBtnX = runBtnX + runBtnW + 8
     let stopBtnBounds = rect(stopBtnX, y, 32, ButtonHeight)
     panel.stopBtnBounds = stopBtnBounds
@@ -119,11 +108,11 @@ proc render*(panel: DebugSidebar; bounds: Rect; font: Font) =
   let statusLabel = "Status: "
   discard drawText(font, bounds.x + 8, y, statusLabel, textMuted, color(0, 0, 0, 0))
   let statusX = bounds.x + 8 + measureText(font, statusLabel).w + 4
-  let statusColor = case panel.status
-    of "Running": successC
-    of "Stopped": errorC
+  let statusColor = case panel.state
+    of dssRunning: successC
+    of dssStopped, dssError, dssTerminated: errorC
     else: textMuted
-  discard drawText(font, statusX, y, panel.status, statusColor, color(0, 0, 0, 0))
+  discard drawText(font, statusX, y, panel.state.statusString(), statusColor, color(0, 0, 0, 0))
   y += SectionHeaderHeight + 4
 
   fillRect(rect(bounds.x + 4, y, bounds.w - 8, 1), borderC)
@@ -185,11 +174,9 @@ proc handleMouse*(panel: DebugSidebar; e: Event; bounds: Rect): bool =
     if e.kind == MouseMoveEvent:
       panel.hoverBtn = "run"
     elif e.kind == MouseDownEvent:
-      let isRunning = panel.status == "Running"
-      let isStopped = panel.status == "Stopped"
-      if isRunning or isStopped:
+      if panel.state.canContinue:
         if panel.onContinue != nil: panel.onContinue()
-      else:
+      elif panel.state.canStart:
         if panel.onStartDebug != nil: panel.onStartDebug()
     return true
 
@@ -229,8 +216,10 @@ proc handleInput*(panel: DebugSidebar; e: Event): bool =
   if e.kind == KeyDownEvent:
     case e.key
     of KeyF5:
-      if panel.onStartDebug != nil:
-        panel.onStartDebug()
+      if panel.state.canContinue:
+        if panel.onContinue != nil: panel.onContinue()
+      elif panel.state.canStart:
+        if panel.onStartDebug != nil: panel.onStartDebug()
       return true
     else:
       discard

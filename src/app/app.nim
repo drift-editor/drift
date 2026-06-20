@@ -12,6 +12,7 @@ import ../services/dap_thread
 import ../services/git as gitcmd
 import ../core/types
 import ../core/config as cfg
+import ../core/debug_types
 import ../core/recent_files
 import ../editor/[marker_manager, color_highlight, git_diff, sticky_scroll]
 import ../utils/text
@@ -127,9 +128,7 @@ type
 
     # DAP
     dapThread: DAPThread
-    dapStarting: bool
-    debugSessionActive: bool
-    debugStopped: bool
+    debugState: DebugSessionState
     debugStopThreadId: int
     breakpoints: seq[tuple[path: string; line: int; enabled: bool]]
     hoverPendingPos: int
@@ -197,7 +196,7 @@ proc applyTheme*(app: App, name: string) =
   saveConfig(app.config)
 
 proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
-  var app = App(config: config, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel("Ask " & cfg.aiDisplayName(config) & "..."), debugSessionActive: false, debugStopped: false, debugStopThreadId: 0, breakpoints: @[])
+  var app = App(config: config, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel("Ask " & cfg.aiDisplayName(config) & "..."), debugState: dssOff, debugStopThreadId: 0, breakpoints: @[])
   app.aiPanel.onSend = proc(text: string) =
     if app.aiThread == nil:
       app.aiThread = newAIThread(app.config)
@@ -263,17 +262,14 @@ proc lspStatusString(app: App): string =
     return "LSP: off"
 
 proc dapStatusString(app: App): string =
-  if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
-    if app.debugStopped:
-      return "DBG: stopped"
-    elif app.debugSessionActive:
-      return "DBG: running"
-    else:
-      return "DBG: ready"
-  elif app.dapStarting:
-    return "DBG: starting..."
-  else:
-    return "DBG: off"
+  case app.debugState
+  of dssOff: "DBG: off"
+  of dssStarting: "DBG: starting..."
+  of dssReady: "DBG: ready"
+  of dssRunning: "DBG: running"
+  of dssStopped: "DBG: stopped"
+  of dssError: "DBG: error"
+  of dssTerminated: "DBG: terminated"
 
 proc updateStatus(app: App) =
   var leftSections: seq[string]
@@ -1138,6 +1134,98 @@ proc openFolderDialog*(app: App): bool =
 
 # Public API
 
+proc continueDebugging*(app: App) =
+  if not app.debugState.canContinue: return
+  if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
+    app.debugState = dssRunning
+    app.dapThread.requestContinue(app.debugStopThreadId)
+
+proc startDebugging*(app: App) =
+  if not app.debugState.canStart:
+    discard app.notificationManager.warning("A debug session is already active")
+    return
+  if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
+    discard app.notificationManager.error("No file open to debug")
+    return
+  let b = app.buffers[app.currentBuffer]
+  if b.path.len == 0:
+    discard app.notificationManager.error("Save the file before debugging")
+    return
+  let exePath = b.path.changeFileExt("")
+  if not fileExists(exePath):
+    discard app.notificationManager.info("Building " & b.path.extractFilename & "...")
+    let buildRes = execCmdEx("nim c --debugger:native \"" & b.path & "\"")
+    if buildRes.exitCode != 0:
+      discard app.notificationManager.error("Build failed")
+      app.debugPanel.addOutput(buildRes.output)
+      app.showTerminal = true
+      app.bottomPanelTab = "debug"
+      return
+  app.dapThread = newDAPThread(app.config.dapServer)
+  app.debugState = dssStarting
+  app.debugStopThreadId = 0
+  app.debugPanel.clear()
+  app.showTerminal = true
+  app.bottomPanelTab = "debug"
+  discard app.notificationManager.info("Debug session started")
+
+proc startOrContinueDebugging*(app: App) =
+  if app.debugState.canContinue:
+    app.continueDebugging()
+  else:
+    app.startDebugging()
+
+proc stopDebugging*(app: App) =
+  if not app.debugState.canStop: return
+  if app.dapThread != nil:
+    app.dapThread.requestDisconnect()
+    app.dapThread.shutdown()
+    app.dapThread = nil
+  app.debugState = dssOff
+  app.debugStopThreadId = 0
+  discard app.notificationManager.info("Debug session stopped")
+
+proc stepOverDebugging*(app: App) =
+  if not app.debugState.canStep: return
+  if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
+    app.debugState = dssRunning
+    app.dapThread.requestNext(app.debugStopThreadId)
+
+proc stepIntoDebugging*(app: App) =
+  if not app.debugState.canStep: return
+  if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
+    app.debugState = dssRunning
+    app.dapThread.requestStepIn(app.debugStopThreadId)
+
+proc stepOutDebugging*(app: App) =
+  if not app.debugState.canStep: return
+  if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
+    app.debugState = dssRunning
+    app.dapThread.requestStepOut(app.debugStopThreadId)
+
+proc toggleBreakpoint*(app: App) =
+  if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len: return
+  let b = app.buffers[app.currentBuffer]
+  if b.path.len == 0: return
+  let line = b.ed.currentLine
+  var foundIdx = -1
+  for i, bp in app.breakpoints:
+    if bp.path == b.path and bp.line == line:
+      foundIdx = i
+      break
+  if foundIdx >= 0:
+    app.breakpoints.del(foundIdx)
+  else:
+    app.breakpoints.add((path: b.path, line: line, enabled: true))
+  app.updateBreakpointMarkers(app.currentBuffer)
+  # Update breakpoints in running session
+  if app.debugState.isActive and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
+    var lines: seq[int] = @[]
+    for bp in app.breakpoints:
+      if bp.path == b.path and bp.enabled:
+        lines.add(bp.line.toDAPLine())
+    app.dapThread.requestSetBreakpoints(b.path, lines)
+
 proc init*(app: App) =
   let layout = createWindow(app.config.windowWidth, app.config.windowHeight)
   app.width = layout.width
@@ -1228,17 +1316,17 @@ proc init*(app: App) =
   # Debug sidebar
   app.debugSidebar = newDebugSidebar()
   app.debugSidebar.onStartDebug = proc() =
-    app.commands.exec("debug.start")
+    app.startOrContinueDebugging()
   app.debugSidebar.onStopDebug = proc() =
-    app.commands.exec("debug.stop")
+    app.stopDebugging()
   app.debugSidebar.onContinue = proc() =
-    app.commands.exec("debug.start")
+    app.continueDebugging()
   app.debugSidebar.onStepOver = proc() =
-    app.commands.exec("debug.stepOver")
+    app.stepOverDebugging()
   app.debugSidebar.onStepInto = proc() =
-    app.commands.exec("debug.stepInto")
+    app.stepIntoDebugging()
   app.debugSidebar.onStepOut = proc() =
-    app.commands.exec("debug.stepOut")
+    app.stepOutDebugging()
   app.debugSidebar.onNavigate = proc(path: string; line, col: int) =
     if path.len == 0: return
     let idx = app.openBuffer(path)
@@ -1447,99 +1535,26 @@ proc init*(app: App) =
       app.themeSelector.show(app.config.themeName))
 
   # Debug commands
-  app.commandPalette.registerCommand("debug.start", "Start Debugging", "Start a debug session", ccDebug, "F5",
-    proc() =
-      if app.debugSessionActive:
-        if app.debugStopped and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
-          app.debugStopped = false
-          app.debugPanel.status = "Running"
-          app.dapThread.requestContinue(app.debugStopThreadId)
-        return
-      if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
-        discard app.notificationManager.error("No file open to debug")
-        return
-      let b = app.buffers[app.currentBuffer]
-      if b.path.len == 0:
-        discard app.notificationManager.error("Save the file before debugging")
-        return
-      let exePath = b.path.changeFileExt("")
-      if not fileExists(exePath):
-        discard app.notificationManager.info("Building " & b.path.extractFilename & "...")
-        let buildRes = execCmdEx("nim c --debugger:native \"" & b.path & "\"")
-        if buildRes.exitCode != 0:
-          discard app.notificationManager.error("Build failed")
-          app.debugPanel.addOutput(buildRes.output)
-          app.showTerminal = true
-          app.bottomPanelTab = "debug"
-          return
-      app.dapThread = newDAPThread(app.config.dapServer)
-      app.dapStarting = true
-      app.debugSessionActive = true
-      app.debugStopped = false
-      app.debugPanel.status = "Starting"
-      app.debugPanel.clear()
-      app.showTerminal = true
-      app.bottomPanelTab = "debug"
-      discard app.notificationManager.info("Debug session started"))
+  app.commandPalette.registerCommand("debug.start", "Start Debugging", "Start or continue a debug session", ccDebug, "F5",
+    proc() = app.startOrContinueDebugging())
+
+  app.commandPalette.registerCommand("debug.continue", "Continue", "Continue execution", ccDebug, "",
+    proc() = app.continueDebugging())
 
   app.commandPalette.registerCommand("debug.stop", "Stop Debugging", "Stop the current debug session", ccDebug, "Shift+F5",
-    proc() =
-      if app.dapThread != nil:
-        app.dapThread.requestDisconnect()
-        app.dapThread.shutdown()
-        app.dapThread = nil
-      app.dapStarting = false
-      app.debugSessionActive = false
-      app.debugStopped = false
-      app.debugStopThreadId = 0
-      app.debugPanel.status = "Not started"
-      discard app.notificationManager.info("Debug session stopped"))
+    proc() = app.stopDebugging())
 
   app.commandPalette.registerCommand("debug.stepOver", "Step Over", "Step over the current line", ccDebug, "F10",
-    proc() =
-      if app.debugStopped and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
-        app.debugStopped = false
-        app.debugPanel.status = "Running"
-        app.dapThread.requestNext(app.debugStopThreadId))
+    proc() = app.stepOverDebugging())
 
   app.commandPalette.registerCommand("debug.stepInto", "Step Into", "Step into the current function", ccDebug, "F11",
-    proc() =
-      if app.debugStopped and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
-        app.debugStopped = false
-        app.debugPanel.status = "Running"
-        app.dapThread.requestStepIn(app.debugStopThreadId))
+    proc() = app.stepIntoDebugging())
 
   app.commandPalette.registerCommand("debug.stepOut", "Step Out", "Step out of the current function", ccDebug, "Shift+F11",
-    proc() =
-      if app.debugStopped and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
-        app.debugStopped = false
-        app.debugPanel.status = "Running"
-        app.dapThread.requestStepOut(app.debugStopThreadId))
+    proc() = app.stepOutDebugging())
 
   app.commandPalette.registerCommand("debug.toggleBreakpoint", "Toggle Breakpoint", "Toggle breakpoint on current line", ccDebug, "F9",
-    proc() =
-      if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
-        return
-      let b = app.buffers[app.currentBuffer]
-      if b.path.len == 0: return
-      let line = b.ed.currentLine
-      var foundIdx = -1
-      for i, bp in app.breakpoints:
-        if bp.path == b.path and bp.line == line:
-          foundIdx = i
-          break
-      if foundIdx >= 0:
-        app.breakpoints.del(foundIdx)
-      else:
-        app.breakpoints.add((path: b.path, line: line, enabled: true))
-      app.updateBreakpointMarkers(app.currentBuffer)
-      # Update breakpoints in running session
-      if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
-        var lines: seq[int] = @[]
-        for bp in app.breakpoints:
-          if bp.path == b.path and bp.enabled:
-            lines.add(bp.line)
-        app.dapThread.requestSetBreakpoints(b.path, lines))
+    proc() = app.toggleBreakpoint())
 
   app.commandPalette.registerCommand("view.toggleDebug", "Toggle Debug Panel", "Show the Debug panel in the bottom panel", ccView, "Ctrl+Shift+D",
     proc() =
@@ -2036,7 +2051,7 @@ proc run*(app: App) =
         # Sync breakpoints to debug sidebar
         app.debugSidebar.breakpoints = @[]
         for bp in app.breakpoints:
-          app.debugSidebar.breakpoints.add(debug_sidebar.Breakpoint(path: bp.path, line: bp.line, enabled: bp.enabled))
+          app.debugSidebar.breakpoints.add(Breakpoint(path: bp.path, line: bp.line, enabled: bp.enabled))
         app.debugSidebar.render(sidebarBounds, app.uiFont)
       else:
         app.fileExplorer.render(sidebarBounds, app.uiFont)
@@ -2137,130 +2152,115 @@ proc run*(app: App) =
           discard
 
     # Poll DAP responses
-    if app.dapThread != nil:
-      while true:
-        let respOpt = app.dapThread.getResponse()
-        if respOpt.isNone:
-          break
-        let resp = respOpt.get()
-        stderr.writeLine("[app] DAP response: " & $resp.kind)
-        case resp.kind
-        of dmkReady:
-          app.dapStarting = false
-          stderr.writeLine("[app] DAP ready")
-          if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
-            let b = app.buffers[app.currentBuffer]
-            if b.path.len > 0:
-              var lines: seq[int] = @[]
-              for bp in app.breakpoints:
-                if bp.path == b.path and bp.enabled:
-                  lines.add(bp.line)
-              app.dapThread.requestSetBreakpoints(b.path, lines)
-              app.dapThread.requestLaunch(b.path.changeFileExt(""), cwd = b.path.parentDir, stopOnEntry = false)
-              app.dapThread.requestConfigurationDone()
-              app.debugPanel.status = "Running"
-        of dmkError:
-          app.dapStarting = false
-          app.debugSessionActive = false
-          stderr.writeLine("[app] DAP error: " & resp.str1)
-          discard app.notificationManager.error("DAP: " & resp.str1)
-          app.debugPanel.status = "Error"
-        of dmkStopped:
-          app.debugStopped = true
-          app.debugStopThreadId = resp.int1
-          app.debugPanel.status = "Stopped"
-          stderr.writeLine("[app] DAP stopped: reason=" & resp.str1 & " threadId=" & $resp.int1)
-          if app.dapThread != nil and app.dapThread.isReady.load(moAcquire) and resp.int1 > 0:
-            app.dapThread.requestStackTrace(resp.int1)
-          # Try to navigate to stop location if description contains path:line
-          if resp.str2.len > 0:
-            app.debugPanel.addOutput("Stopped: " & resp.str1 & " - " & resp.str2)
-          else:
-            app.debugPanel.addOutput("Stopped: " & resp.str1)
-        of dmkOutput:
-          app.debugPanel.addOutput(resp.str2)
-        of dmkTerminated:
-          app.debugSessionActive = false
-          app.debugStopped = false
-          app.debugStopThreadId = 0
-          app.debugPanel.status = "Terminated"
-          app.debugPanel.addOutput("Debug session terminated")
-        of dmkStackTraceResponse:
-          if resp.jsonData != nil and resp.jsonData.hasKey("body") and resp.jsonData["body"].hasKey("stackFrames"):
-            var frames: seq[debug_panel.StackFrame] = @[]
-            for item in resp.jsonData["body"]["stackFrames"]:
-              let id = if item.hasKey("id"): item["id"].getInt() else: 0
-              let name = if item.hasKey("name"): item["name"].getStr() else: ""
-              var source = ""
-              var line = 0
-              var column = 0
-              if item.hasKey("source") and item["source"].hasKey("path"):
-                source = item["source"]["path"].getStr()
-              if item.hasKey("line"):
-                line = item["line"].getInt() - 1  # Convert to 0-based
-              if item.hasKey("column"):
-                column = item["column"].getInt() - 1
-              frames.add(debug_panel.StackFrame(id: id, name: name, source: source, line: line, column: column))
-            app.debugPanel.frames = frames
-            # Sync frames to debug sidebar
-            app.debugSidebar.frames = @[]
-            for f in frames:
-              app.debugSidebar.frames.add(debug_sidebar.StackFrame(id: f.id, name: f.name, source: f.source, line: f.line, column: f.column))
-            # Auto-navigate to top frame
-            if frames.len > 0 and frames[0].source.len > 0:
-              let idx = app.openBuffer(frames[0].source)
-              if idx >= 0 and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
-                app.buffers[app.currentBuffer].ed.gotoLine(frames[0].line, frames[0].column)
-        of dmkVariablesResponse:
-          discard  # TODO: show variables in debug panel
+    while app.dapThread != nil:
+      let respOpt = app.dapThread.getResponse()
+      if respOpt.isNone:
+        break
+      let resp = respOpt.get()
+      stderr.writeLine("[app] DAP response: " & $resp.kind)
+      case resp.kind
+      of dmkReady:
+        app.debugState = dssReady
+        stderr.writeLine("[app] DAP ready")
+        if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+          let b = app.buffers[app.currentBuffer]
+          if b.path.len > 0:
+            var lines: seq[int] = @[]
+            for bp in app.breakpoints:
+              if bp.path == b.path and bp.enabled:
+                lines.add(bp.line.toDAPLine())
+            app.dapThread.requestSetBreakpoints(b.path, lines)
+            app.dapThread.requestLaunch(b.path.changeFileExt(""), cwd = b.path.parentDir, stopOnEntry = false)
+            app.dapThread.requestConfigurationDone()
+      of dmkRunning:
+        app.debugState = dssRunning
+      of dmkError:
+        app.debugState = dssError
+        stderr.writeLine("[app] DAP error: " & resp.str1)
+        discard app.notificationManager.error("DAP: " & resp.str1)
+        if app.dapThread != nil:
+          app.dapThread.shutdown()
+          app.dapThread = nil
+        app.debugStopThreadId = 0
+      of dmkStopped:
+        app.debugState = dssStopped
+        app.debugStopThreadId = resp.int1
+        stderr.writeLine("[app] DAP stopped: reason=" & resp.str1 & " threadId=" & $resp.int1)
+        if app.dapThread != nil and app.dapThread.isReady.load(moAcquire) and resp.int1 > 0:
+          app.dapThread.requestStackTrace(resp.int1)
+        # Try to navigate to stop location if description contains path:line
+        if resp.str2.len > 0:
+          app.debugPanel.addOutput("Stopped: " & resp.str1 & " - " & resp.str2)
         else:
-          discard
-        # Sync debug panel status to sidebar
-        app.debugSidebar.status = app.debugPanel.status
+          app.debugPanel.addOutput("Stopped: " & resp.str1)
+      of dmkOutput:
+        app.debugPanel.addOutput(resp.str2)
+      of dmkTerminated:
+        app.debugState = dssTerminated
+        app.debugStopThreadId = 0
+        app.debugPanel.addOutput("Debug session terminated")
+        if app.dapThread != nil:
+          app.dapThread.shutdown()
+          app.dapThread = nil
+      of dmkStackTraceResponse:
+        let frames = parseStackFrames(resp.jsonData)
+        app.debugPanel.frames = frames
+        # Sync frames to debug sidebar
+        app.debugSidebar.frames = frames
+        # Auto-navigate to top frame
+        if frames.len > 0 and frames[0].source.len > 0:
+          let idx = app.openBuffer(frames[0].source)
+          if idx >= 0 and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+            app.buffers[app.currentBuffer].ed.gotoLine(frames[0].line, frames[0].column)
+      of dmkVariablesResponse:
+        discard  # TODO: show variables in debug panel
+      else:
+        discard
+      # Sync debug panel state to sidebar
+      app.debugSidebar.state = app.debugPanel.state
 
     # Poll AI responses
-    if app.aiThread != nil:
-      while true:
-        let respOpt = app.aiThread.getResponse()
-        if respOpt.isNone:
-          break
-        let resp = respOpt.get()
-        case resp.kind
-        of amkReady:
-          stderr.writeLine("[app] AI thread ready")
-        of amkResponseChunk:
-          app.aiPanel.appendText(resp.text)
-        of amkResponseDone:
-          app.aiPanel.finalizeMessage()
-        of amkThinking:
-          app.aiPanel.appendText(resp.text)
-        of amkFileChanged:
-          let path = resp.text
-          stderr.writeLine("[app] AI changed file: " & path)
-          for i, b in app.buffers:
-            if b.path == path:
-              if b.ed.changed:
-                discard app.notificationManager.warning("AI modified " & extractFilename(path) & " — reload skipped (unsaved changes)")
-              else:
-                try:
-                  app.buffers[i].ed.loadFromFile(path)
-                except CatchableError:
-                  discard
-              break
-          app.fileExplorer.refresh()
-        of amkCancel:
-          app.aiPanel.finalizeMessage()
-          app.aiPanel.isStreaming = false
-        of amkError:
-          stderr.writeLine("[app] AI error: " & resp.error)
-          app.aiPanel.appendText("Error: " & resp.error)
-          app.aiPanel.finalizeMessage()
-          app.aiPanel.isStreaming = false
-          discard app.notificationManager.error("AI: " & resp.error)
-          # Thread has exited or is unusable; clear it so the next send creates a fresh one.
-          app.aiThread = nil
-        else:
-          discard
+    while app.aiThread != nil:
+      let respOpt = app.aiThread.getResponse()
+      if respOpt.isNone:
+        break
+      let resp = respOpt.get()
+      case resp.kind
+      of amkReady:
+        stderr.writeLine("[app] AI thread ready")
+      of amkResponseChunk:
+        app.aiPanel.appendText(resp.text)
+      of amkResponseDone:
+        app.aiPanel.finalizeMessage()
+      of amkThinking:
+        app.aiPanel.appendText(resp.text)
+      of amkFileChanged:
+        let path = resp.text
+        stderr.writeLine("[app] AI changed file: " & path)
+        for i, b in app.buffers:
+          if b.path == path:
+            if b.ed.changed:
+              discard app.notificationManager.warning("AI modified " & extractFilename(path) & " — reload skipped (unsaved changes)")
+            else:
+              try:
+                app.buffers[i].ed.loadFromFile(path)
+              except CatchableError:
+                discard
+            break
+        app.fileExplorer.refresh()
+      of amkCancel:
+        app.aiPanel.finalizeMessage()
+        app.aiPanel.isStreaming = false
+      of amkError:
+        stderr.writeLine("[app] AI error: " & resp.error)
+        app.aiPanel.appendText("Error: " & resp.error)
+        app.aiPanel.finalizeMessage()
+        app.aiPanel.isStreaming = false
+        discard app.notificationManager.error("AI: " & resp.error)
+        # Thread has exited or is unusable; clear it so the next send creates a fresh one.
+        app.aiThread = nil
+      else:
+        discard
 
     # Diff View (replaces editor when active)
     if isDiffBuffer and app.diffView != nil:

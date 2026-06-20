@@ -5,6 +5,7 @@ import uirelays
 import uirelays/screen
 import uirelays/input
 import theme
+import ../core/debug_types
 
 const
   DbgSectionHeight* = 26
@@ -12,15 +13,8 @@ const
   DbgOutputHeight* = 120
 
 type
-  StackFrame* = object
-    id*: int
-    name*: string
-    source*: string
-    line*: int
-    column*: int
-
   DebugPanel* = ref object
-    status*: string
+    state*: DebugSessionState
     frames*: seq[StackFrame]
     output*: seq[string]
     scrollOffset*: int
@@ -31,7 +25,7 @@ type
 
 proc newDebugPanel*(): DebugPanel =
   DebugPanel(
-    status: "Not started",
+    state: dssOff,
     frames: @[],
     output: @[],
     scrollOffset: 0,
@@ -40,7 +34,7 @@ proc newDebugPanel*(): DebugPanel =
   )
 
 proc clear*(panel: DebugPanel) =
-  panel.status = "Not started"
+  panel.state = dssOff
   panel.frames = @[]
   panel.output = @[]
   panel.scrollOffset = 0
@@ -71,11 +65,11 @@ proc render*(panel: DebugPanel; bounds: Rect; font: Font; uiFont: Font) =
   let statusLabel = "Status: "
   discard drawText(font, bounds.x + 8, y, statusLabel, textMuted, color(0, 0, 0, 0))
   let statusX = bounds.x + 8 + measureText(font, statusLabel).w + 4
-  let statusColor = case panel.status
-    of "Running": successC
-    of "Stopped": errorC
+  let statusColor = case panel.state
+    of dssRunning: successC
+    of dssStopped, dssError, dssTerminated: errorC
     else: textMuted
-  discard drawText(font, statusX, y, panel.status, statusColor, color(0, 0, 0, 0))
+  discard drawText(font, statusX, y, panel.state.statusString(), statusColor, color(0, 0, 0, 0))
   y += DbgSectionHeight
 
   # Divider

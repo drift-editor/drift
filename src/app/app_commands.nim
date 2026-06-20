@@ -175,22 +175,24 @@ template initCommands*(app: untyped): untyped =
 
     # Debug
     app.commands.bindKey({}, KeyF5, "debug.start")
-    app.commands.register("debug.start") do (): app.commands.exec("debug.start")
+    app.commands.register("debug.start") do (): app.startOrContinueDebugging()
 
     app.commands.bindKey({ShiftPressed}, KeyF5, "debug.stop")
-    app.commands.register("debug.stop") do (): app.commands.exec("debug.stop")
+    app.commands.register("debug.stop") do (): app.stopDebugging()
 
     app.commands.bindKey({}, KeyF10, "debug.stepOver")
-    app.commands.register("debug.stepOver") do (): app.commands.exec("debug.stepOver")
+    app.commands.register("debug.stepOver") do (): app.stepOverDebugging()
 
     app.commands.bindKey({}, KeyF11, "debug.stepInto")
-    app.commands.register("debug.stepInto") do (): app.commands.exec("debug.stepInto")
+    app.commands.register("debug.stepInto") do (): app.stepIntoDebugging()
 
     app.commands.bindKey({ShiftPressed}, KeyF11, "debug.stepOut")
-    app.commands.register("debug.stepOut") do (): app.commands.exec("debug.stepOut")
+    app.commands.register("debug.stepOut") do (): app.stepOutDebugging()
 
     app.commands.bindKey({}, KeyF9, "debug.toggleBreakpoint")
-    app.commands.register("debug.toggleBreakpoint") do (): app.commands.exec("debug.toggleBreakpoint")
+    app.commands.register("debug.toggleBreakpoint") do (): app.toggleBreakpoint()
 
     app.commands.bindKey({CtrlPressed, ShiftPressed}, KeyD, "view.toggleDebug")
-    app.commands.register("view.toggleDebug") do (): app.commands.exec("view.toggleDebug")
+    app.commands.register("view.toggleDebug") do ():
+      app.showTerminal = true
+      app.bottomPanelTab = "debug"

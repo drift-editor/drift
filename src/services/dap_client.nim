@@ -19,6 +19,7 @@ type
   StoppedCallback* = proc(reason: string; threadId: int; description: string) {.gcsafe.}
   OutputCallback* = proc(category: string; output: string) {.gcsafe.}
   TerminatedCallback* = proc() {.gcsafe.}
+  InitializedCallback* = proc() {.gcsafe.}
 
   PendingDAPRequest = object
     future: Future[JsonNode]
@@ -33,6 +34,9 @@ type
     onStopped: StoppedCallback
     onOutput: OutputCallback
     onTerminated: TerminatedCallback
+    onInitialized: InitializedCallback
+    initializedReceived: bool
+    initializedEvent: Future[void]
     readLoop: Future[void]
     stopRequested: bool
     process: AsyncProcessRef
@@ -47,6 +51,7 @@ proc startDAP*(adapterName: string): Future[DAPClient] {.async.} =
     endpoint: LspNimEndpoint.new(),
     state: dapInitializing,
     nextId: 1,
+    initializedEvent: newFuture[void]("dap_initialized"),
   )
   client.pending = initTable[int, PendingDAPRequest]()
 
@@ -167,7 +172,14 @@ proc readLoop(client: DAPClient) {.async: (raises: [Exception]).} =
         let body = if msg.hasKey("body"): msg["body"] else: newJObject()
         case eventName
         of "initialized":
+          client.initializedReceived = true
+          if not client.initializedEvent.finished:
+            client.initializedEvent.complete()
           stderr.writeLine("[dap-client] event: initialized")
+          if client.onInitialized != nil:
+            try: client.onInitialized()
+            except CatchableError as e:
+              stderr.writeLine("[dap-client] error: initialized callback failed: " & e.msg)
         of "stopped":
           client.state = dapStopped
           let reason = if body.hasKey("reason"): body["reason"].getStr() else: ""
@@ -190,7 +202,7 @@ proc readLoop(client: DAPClient) {.async: (raises: [Exception]).} =
               stderr.writeLine("[dap-client] error: output callback failed: " & e.msg)
         of "terminated":
           stderr.writeLine("[dap-client] event: terminated")
-          client.state = dapReady
+          client.state = dapShutdown
           if client.onTerminated != nil:
             try: client.onTerminated()
             except CatchableError as e:
@@ -198,7 +210,7 @@ proc readLoop(client: DAPClient) {.async: (raises: [Exception]).} =
         of "exited":
           let exitCode = if body.hasKey("exitCode"): body["exitCode"].getInt() else: 0
           stderr.writeLine("[dap-client] event: exited code=" & $exitCode)
-          client.state = dapReady
+          client.state = dapShutdown
         else:
           stderr.writeLine("[dap-client] event: " & eventName)
     except CatchableError as e:
@@ -221,12 +233,13 @@ proc stopDAP*(client: DAPClient) {.async.} =
     if not pending.future.finished:
       pending.future.fail(newException(CatchableError, "DAP shutting down"))
   client.pending.clear()
-  try:
-    let disconnectReq = %*{ "seq": client.nextId, "type": "request", "command": "disconnect", "arguments": {} }
-    inc client.nextId
-    await client.endpoint.send($disconnectReq)
-  except CatchableError as e:
-    stderr.writeLine("[dap-client] error: disconnect failed: " & e.msg)
+  if client.state notin {dapError, dapShutdown}:
+    try:
+      let disconnectReq = %*{ "seq": client.nextId, "type": "request", "command": "disconnect", "arguments": {} }
+      inc client.nextId
+      await client.endpoint.send($disconnectReq)
+    except CatchableError as e:
+      stderr.writeLine("[dap-client] error: disconnect failed: " & e.msg)
   client.state = dapShutdown
   if client.readLoop != nil and not client.readLoop.finished:
     try:
@@ -236,9 +249,14 @@ proc stopDAP*(client: DAPClient) {.async.} =
       stderr.writeLine("[dap-client] error: readLoop shutdown exception: " & e.msg)
   if client.process != nil:
     try:
-      discard client.process.terminate()
+      let exitCode = await client.process.terminateAndWaitForExit(2.seconds)
+      stderr.writeLine("[dap-client] process terminated with exit code: " & $exitCode)
     except CatchableError as e:
-      stderr.writeLine("[dap-client] error: process termination failed: " & e.msg)
+      stderr.writeLine("[dap-client] warning: terminate timed out, killing process: " & e.msg)
+      try:
+        discard await client.process.killAndWaitForExit(2.seconds)
+      except CatchableError as e2:
+        stderr.writeLine("[dap-client] error: failed to kill process: " & e2.msg)
 
 # Helpers
 
@@ -263,6 +281,18 @@ proc setOutputCallback*(client: DAPClient; cb: OutputCallback) =
 proc setTerminatedCallback*(client: DAPClient; cb: TerminatedCallback) =
   client.onTerminated = cb
 
+proc setInitializedCallback*(client: DAPClient; cb: InitializedCallback) =
+  client.onInitialized = cb
+
+proc waitForInitialized*(client: DAPClient; timeout: Duration = 30.seconds): Future[bool] {.async.} =
+  if client.initializedReceived:
+    return true
+  if client.state in {dapError, dapShutdown}:
+    return false
+  if await withTimeout(client.initializedEvent, timeout):
+    return true
+  return false
+
 proc beginRequest(client: DAPClient; command: string; arguments: JsonNode): tuple[id: int, future: Future[JsonNode]] =
   let id = client.nextId
   inc client.nextId
@@ -273,6 +303,8 @@ proc beginRequest(client: DAPClient; command: string; arguments: JsonNode): tupl
   asyncSpawn client.endpoint.send($req)
 
 proc sendRequest(client: DAPClient; command: string; arguments: JsonNode): Future[JsonNode] {.async.} =
+  if client == nil or client.state in {dapUninitialized, dapInitializing, dapError, dapShutdown}:
+    raise newException(CatchableError, "DAP client not ready for request: " & command)
   let (id, fut) = beginRequest(client, command, arguments)
   if await withTimeout(fut, 30.seconds):
     result = fut.read()
@@ -373,4 +405,4 @@ proc requestPause*(client: DAPClient; threadId: int) {.async.} =
 proc requestDisconnect*(client: DAPClient) {.async.} =
   if not client.isReady: return
   discard await client.sendRequest("disconnect", newJObject())
-  client.state = dapReady
+  client.state = dapShutdown

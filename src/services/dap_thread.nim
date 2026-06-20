@@ -23,6 +23,7 @@ type
     dmkReady
     dmkError
     dmkStopped
+    dmkRunning
     dmkOutput
     dmkTerminated
     dmkStackTraceResponse
@@ -65,22 +66,26 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
       try:
         client = await startDAP(adapterName)
         stderr.writeLine("[dap-thread] startDAP returned, ready=" & $client.isReady)
-        if client.isReady:
-          client.setStoppedCallback(proc(reason: string; threadId: int; description: string) {.gcsafe.} =
-            stoppedBuffer.add((reason, threadId, description))
-          )
-          client.setOutputCallback(proc(category: string; output: string) {.gcsafe.} =
-            outputBuffer.add((category, output))
-          )
-          client.setTerminatedCallback(proc() {.gcsafe.} =
-            terminatedBuffer.add(0)
-          )
-          client.ensureReadLoop()
-          t.isReady.store(true, moRelease)
-          t.sendResponse(DAPMessage(kind: dmkReady, str1: "Ready"))
-        else:
+        if not client.isReady:
           t.sendResponse(DAPMessage(kind: dmkError, str1: client.errorMsg))
           return
+        client.setStoppedCallback(proc(reason: string; threadId: int; description: string) {.gcsafe.} =
+          stoppedBuffer.add((reason, threadId, description))
+        )
+        client.setOutputCallback(proc(category: string; output: string) {.gcsafe.} =
+          outputBuffer.add((category, output))
+        )
+        client.setTerminatedCallback(proc() {.gcsafe.} =
+          terminatedBuffer.add(0)
+        )
+        client.ensureReadLoop()
+        stderr.writeLine("[dap-thread] waiting for initialized event")
+        let initOk = await client.waitForInitialized(30.seconds)
+        if not initOk:
+          t.sendResponse(DAPMessage(kind: dmkError, str1: "DAP adapter did not send initialized event"))
+          return
+        t.isReady.store(true, moRelease)
+        t.sendResponse(DAPMessage(kind: dmkReady, str1: "Ready"))
       except CatchableError as e:
         stderr.writeLine("[dap-thread] startDAP exception: " & e.msg)
         t.sendResponse(DAPMessage(kind: dmkError, str1: e.msg))
@@ -137,12 +142,18 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
             of dmkShutdown: running = false
             else: discard
 
-          if running and lastLaunch.isSome:
-            let l = lastLaunch.get()
-            asyncSpawn requestLaunch(client, l.str1, args = @[], cwd = l.str2, stopOnEntry = l.int1 != 0)
+          # Setup requests must be ordered: setBreakpoints, launch, configurationDone.
           if running and lastSetBreakpoints.isSome:
             let b = lastSetBreakpoints.get()
             asyncSpawn asyncSetBreakpoints(client, b.str1, b.lines)
+          if running and lastLaunch.isSome:
+            let l = lastLaunch.get()
+            try:
+              await requestLaunch(client, l.str1, args = @[], cwd = l.str2, stopOnEntry = l.int1 != 0)
+              t.sendResponse(DAPMessage(kind: dmkRunning))
+            except CatchableError as e:
+              stderr.writeLine("[dap-thread] launch failed: " & e.msg)
+              t.sendResponse(DAPMessage(kind: dmkError, str1: "Launch failed: " & e.msg))
           if running and lastConfigDone.isSome:
             asyncSpawn requestConfigurationDone(client)
           if running and lastStackTrace.isSome:
@@ -153,16 +164,16 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
             let v = lastVariables.get()
             variablesFuture = requestVariables(client, v.int1)
             variablesRequestMeta = some(v)
-          if running and lastContinue.isSome:
+          if running and lastContinue.isSome and client.isStopped:
             let c = lastContinue.get()
             asyncSpawn requestContinue(client, c.int1)
-          if running and lastNext.isSome:
+          if running and lastNext.isSome and client.isStopped:
             let n = lastNext.get()
             asyncSpawn requestNext(client, n.int1)
-          if running and lastStepIn.isSome:
+          if running and lastStepIn.isSome and client.isStopped:
             let s = lastStepIn.get()
             asyncSpawn requestStepIn(client, s.int1)
-          if running and lastStepOut.isSome:
+          if running and lastStepOut.isSome and client.isStopped:
             let s = lastStepOut.get()
             asyncSpawn requestStepOut(client, s.int1)
           if running and lastPause.isSome:
@@ -219,7 +230,7 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
           await sleepAsync(chronos.timer.milliseconds(sleepMs))
 
       try:
-        if client != nil and client.isReady:
+        if client != nil:
           await stopDAP(client)
       except CatchableError:
         discard
