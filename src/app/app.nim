@@ -1923,7 +1923,7 @@ proc run*(app: App) =
             dlg.centerOnScreen(app.width, app.height)
             app.dialogManager.show(dlg)
           buildExplorerContextMenu(app.contextMenu, node, app.fileExplorer.rootPath, app.width, app.height, app.uiFont, callbacks)
-          app.contextMenu.showAt(e.x, e.y)
+          app.contextMenu.showAt(e.x, e.y, app.width, app.height)
           discard app.gi.consume()
         elif app.sidebarVisible and app.showGitPanel and sidebarBounds.contains(point(e.x, e.y)):
           let (filePath, isStaged) = app.gitPanel.fileAt(e.x, e.y, sidebarBounds)

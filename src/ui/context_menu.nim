@@ -123,6 +123,19 @@ proc hideAll*(menu: ContextMenu) =
     current.hide()
     current = current.parent
 
+proc fitMenuBounds*(x, y, w, h, screenW, screenH: int): Rect =
+  var nx = x
+  var ny = y
+  if nx + w > screenW:
+    nx = x - w
+  if ny + h > screenH:
+    ny = y - h
+  if nx < 0:
+    nx = 0
+  if ny < 0:
+    ny = 0
+  rect(nx, ny, w, h)
+
 proc showAt*(menu: ContextMenu, x, y: int) =
   menu.isVisible = true
   menu.selectedIndex = -1
@@ -142,6 +155,12 @@ proc showAt*(menu: ContextMenu, x, y: int) =
     maxWidth = max(maxWidth, itemWidth)
 
   menu.bounds = rect(x, y, maxWidth, height)
+
+proc showAt*(menu: ContextMenu, x, y, screenW, screenH: int) =
+  menu.showAt(x, y)
+  menu.bounds = fitMenuBounds(menu.bounds.x, menu.bounds.y,
+                              menu.bounds.w, menu.bounds.h,
+                              screenW, screenH)
 
 proc hide*(menu: ContextMenu) =
   menu.isVisible = false
