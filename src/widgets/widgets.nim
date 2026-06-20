@@ -48,16 +48,17 @@ proc render*(box: InputBox; font: Font; bounds: Rect; hovered, blink: bool; curs
          if box.focused: accent else: borderC)
 
   if box.icon != iiNone:
-    drawIcon(box.icon, bounds.x + 24, bounds.y + (bounds.h - 16) div 2)
+    drawIcon(box.icon, bounds.x + 4, bounds.y + (bounds.h - 16) div 2)
 
   let clearW = if box.showClear: 20 + WidgetPadding * 2 else: 0
-  let textAreaW = bounds.w - 24 - 20 - WidgetPadding * 2 - clearW
+  let textX = if box.icon != iiNone: bounds.x + 4 + 16 + 4 else: bounds.x + 4
+  let leftMargin = textX - bounds.x
+  let textAreaW = bounds.w - leftMargin - 20 - WidgetPadding * 2 - clearW
   let display = if box.text.len > 0: box.text else: box.placeholder
   let color = if box.text.len > 0: textC else: placeholderC
   var textClip = display
   while textClip.len > 0 and measureText(font, textClip).w > textAreaW:
     textClip.setLen(textClip.len - 1)
-  let textX = bounds.x + 24 + 18
   let textH = measureText(font, display).h
   let textY = bounds.y + (bounds.h - textH) div 2
   discard drawText(font, textX, textY, textClip, color, inputBg)
@@ -73,7 +74,7 @@ proc render*(box: InputBox; font: Font; bounds: Rect; hovered, blink: bool; curs
     fillRect(rect(cursorX, cursorY, 2, cursorH), textC)
 
   if box.showClear and box.text.len > 0:
-    let textEndX = bounds.x + 24 + 18 + textAreaW
+    let textEndX = textX + textAreaW
     let clearBounds = rect(textEndX + 4, bounds.y + (bounds.h - 20) div 2, 20, 20)
     if hovered:
       fillRect(clearBounds, currentTheme.getColor(tcSurfaceHover))
@@ -83,10 +84,11 @@ proc handleMouse*(box: var InputBoxState; e: Event; bounds: Rect; editableWidth:
   if e.kind == MouseDownEvent or e.kind == MouseMoveEvent:
     box.hovered = bounds.contains(point(e.x, e.y))
   if e.kind == MouseDownEvent and box.hovered:
+    let textX = if box.icon != iiNone: bounds.x + 4 + 16 + 4 else: bounds.x + 4
     if box.showClear and box.text.len > 0 and e.x >= bounds.x + bounds.w - 20 - WidgetPadding:
       box.text.setLen(0)
       return true
-    if e.x >= bounds.x + 24 + 18 and e.x < bounds.x + 24 + 18 + editableWidth:
+    if e.x >= textX and e.x < textX + editableWidth:
       return true
   false
 

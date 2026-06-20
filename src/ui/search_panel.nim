@@ -47,7 +47,6 @@ type
     useRegex*: bool = false
     wholeWord*: bool = false
     isVisible*: bool = false
-    showReplace*: bool = false
     # current file search state
     currentMatchIndex*: int = -1
     matches*: seq[FileMatch] = @[]
@@ -358,7 +357,6 @@ proc replaceAll*(panel: var SearchPanel; ed: ptr SynEdit): bool =
 
 proc show*(panel: var SearchPanel; ed: ptr SynEdit; focusReplace: bool = false) =
   panel.isVisible = true
-  panel.showReplace = focusReplace
   panel.focus = if focusReplace: 1 else: 0
   panel.currentMatchIndex = -1
   panel.resultScroll = 0
@@ -557,14 +555,11 @@ proc handleMouse*(panel: var SearchPanel; ed: ptr SynEdit; e: Event; bounds: Rec
   let findY = y
   y += INPUT_HEIGHT + 4
 
-  # Expand-replace toggle
-  var replaceToggleY = 0
+  # Replace input (always shown in File mode)
   var replaceY = 0
   if panel.mode == smCurrentFile:
-    replaceToggleY = y
-    if panel.showReplace:
-      replaceY = y
-      y += INPUT_HEIGHT + 4
+    replaceY = y
+    y += INPUT_HEIGHT + 4
 
   # Action row
   let actionY = y
@@ -618,19 +613,13 @@ proc handleMouse*(panel: var SearchPanel; ed: ptr SynEdit; e: Event; bounds: Rec
   # Find input hit-test
   if relY >= findY and relY < findY + INPUT_HEIGHT:
     let toggleAreaW = TOGGLE_SIZE * 3 + 8
-    let textAreaW = inputW - toggleAreaW - 24 - 20 - 4
-    # Expand-replace toggle
-    if panel.mode == smCurrentFile and relX >= PADDING + 4 and relX < PADDING + 20:
-      panel.hoveredButton = 4
-      if e.kind == MouseDownEvent:
-        panel.showReplace = not panel.showReplace
-      return true
+    let textAreaW = inputW - toggleAreaW - 30
     # Text area - click to position cursor
-    if relX >= PADDING + 24 + 18 and relX < PADDING + 24 + 18 + textAreaW:
+    if relX >= PADDING + 24 and relX < PADDING + 24 + textAreaW:
       panel.hoverInput = true
       panel.focus = 0
       if e.kind == MouseDownEvent:
-        let relClickX = relX - (PADDING + 24 + 18)
+        let relClickX = relX - (PADDING + 24)
         var newPos = panel.findText.len
         let textLen = panel.findText.len
         for i in 0 ..< textLen:
@@ -679,13 +668,13 @@ proc handleMouse*(panel: var SearchPanel; ed: ptr SynEdit; e: Event; bounds: Rec
       return true
 
   # Replace input hit-test
-  if panel.showReplace and panel.mode == smCurrentFile and relY >= replaceToggleY and relY < replaceToggleY + INPUT_HEIGHT:
-    let textAreaW = inputW - 26 - 4
-    if relX >= PADDING + 26 and relX < PADDING + 26 + textAreaW:
+  if panel.mode == smCurrentFile and relY >= replaceY and relY < replaceY + INPUT_HEIGHT:
+    let textAreaW = inputW - 8
+    if relX >= PADDING + 4 and relX < PADDING + 4 + textAreaW:
       panel.hoverInput = true
       panel.focus = 1
       if e.kind == MouseDownEvent:
-        let relClickX = relX - (PADDING + 26)
+        let relClickX = relX - (PADDING + 4)
         var newPos = panel.replaceText.len
         let textLen = panel.replaceText.len
         for i in 0 ..< textLen:
@@ -724,7 +713,7 @@ proc handleMouse*(panel: var SearchPanel; ed: ptr SynEdit; e: Event; bounds: Rec
       return true
     btnX += TOGGLE_SIZE + 4
 
-    if panel.mode == smCurrentFile and panel.showReplace:
+    if panel.mode == smCurrentFile:
       # Replace button
       let repBtnW = 52
       if relX >= btnX and relX < btnX + repBtnW:
@@ -889,14 +878,6 @@ proc render*(panel: var SearchPanel; ed: ptr SynEdit; bounds: Rect) =
   let hoveredClear = panel.hoveredButton == 5
   findBox.render(panel.font, findBounds, hoveredClear, blink, panel.findCursor, accent, bg, borderC, textC, textSecondary)
 
-  # Expand-replace toggle
-  if panel.mode == smCurrentFile:
-    let expandBounds = rect(findBounds.x + 4, findBounds.y + (INPUT_HEIGHT - 16) div 2, 16, 16)
-    let expandIcon = if panel.showReplace: iiChevronDown else: iiChevronRight
-    if panel.hoveredButton == 4:
-      fillRect(expandBounds, bgHover)
-    drawIconCentered(expandIcon, expandBounds)
-
   # Toggles using widget component
   var toggleX = findBounds.x + findBounds.w - PADDING - TOGGLE_SIZE + 4
   var wholeWordToggle = Toggle(active: panel.wholeWord)
@@ -916,7 +897,7 @@ proc render*(panel: var SearchPanel; ed: ptr SynEdit; bounds: Rect) =
   y += INPUT_HEIGHT + 4
 
   # Replace input using widget component
-  if panel.mode == smCurrentFile and panel.showReplace:
+  if panel.mode == smCurrentFile:
     let replaceBounds = rect(bounds.x + PADDING, y, inputW, INPUT_HEIGHT)
     var replaceBox = InputBox(text: panel.replaceText, placeholder: "Replace", icon: iiNone,
                             focused: panel.focus == 1, showClear: false,
@@ -940,7 +921,7 @@ proc render*(panel: var SearchPanel; ed: ptr SynEdit; bounds: Rect) =
   nextBtn.render(nextBounds, panel.hoveredButton == 1, bgHover)
   btnX += TOGGLE_SIZE + 4
 
-  if panel.mode == smCurrentFile and panel.showReplace:
+  if panel.mode == smCurrentFile:
     # Replace button
     var replaceBtn = newActionButton("Replace")
     let repBtnBounds = rect(btnX, actionY + (ACTION_BTN_H - TOGGLE_SIZE) div 2, 52, TOGGLE_SIZE)
