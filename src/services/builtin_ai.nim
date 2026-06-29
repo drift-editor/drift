@@ -4,6 +4,7 @@
 
 import std/[httpclient, json, strutils, uri]
 import ../core/config
+import prompt_complexity
 
 type BuiltinModelProvider* = object
   id*: string
@@ -70,7 +71,7 @@ proc allBuiltinModels*(): seq[tuple[providerId, model, label: string]] =
 
 proc makeChatRequest*(config: AppConfig, prompt: string): string =
   ## Build OpenAI-compatible /chat/completions request body.
-  let (_, model) = effectiveBuiltinModel(config)
+  let (_, model) = resolveBuiltinModel(config, prompt)
   let messages = %*[{"role": "user", "content": prompt}]
   let body = %*{
     "model": model,
@@ -83,7 +84,7 @@ proc doChatCompletion*(config: AppConfig, prompt: string): string =
   ## Synchronous HTTP call to the configured endpoint.
   ## Returns the assistant message content, or an error string starting with
   ## "HTTP error", "Request failed", or "Unexpected response".
-  let (providerId, _) = effectiveBuiltinModel(config)
+  let (providerId, _) = resolveBuiltinModel(config, prompt)
   var baseUrl = config.aiBaseUrl
   if baseUrl.len == 0:
     baseUrl = defaultBaseUrl(providerId)
