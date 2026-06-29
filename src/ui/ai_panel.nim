@@ -9,12 +9,15 @@ import theme, icons
 
 const
   HeaderHeight = 32
-  InputHeight = 72
+  InputHeight = 96
+  ToolbarHeight = 24
   MessagePadding = 8
   MessageGap = 4
   MaxMessageWidth = 220
   ButtonWidth = 90
   ButtonHeight = 24
+  ModelButtonWidth = 80
+  PresetButtonWidth = 32
 
 type
   ChatMessage* = object
@@ -40,11 +43,19 @@ type
     onSend*: proc(text: string)
     onNewSession*: proc()
     onStop*: proc()
-    onNewChatMenu*: proc(x, y: int)
+    onAgentMenu*: proc(x, y: int)
+    onModelMenu*: proc(x, y: int)
+    onToggleModelPreset*: proc()
     hoverNewChat*: bool
+    hoverAgentMenu*: bool
     hoverStop*: bool
+    hoverModelPreset*: bool
+    hoverModelMenu*: bool
     placeholder*: string
     subtitle*: string
+    modelPreset*: string
+    modelButtonLabel*: string
+    showModelControls*: bool
     userScrolledUp*: bool
     rightClickedMessageIndex*: int
 
@@ -61,11 +72,19 @@ proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
     onSend: nil,
     onNewSession: nil,
     onStop: nil,
-    onNewChatMenu: nil,
+    onAgentMenu: nil,
+    onModelMenu: nil,
+    onToggleModelPreset: nil,
     hoverNewChat: false,
+    hoverAgentMenu: false,
     hoverStop: false,
+    hoverModelPreset: false,
+    hoverModelMenu: false,
     placeholder: placeholder,
     subtitle: "",
+    modelPreset: "lightweight",
+    modelButtonLabel: "Model",
+    showModelControls: false,
     userScrolledUp: false,
     rightClickedMessageIndex: -1
   )
@@ -326,17 +345,32 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
           panel.onStop()
         return true
 
-    # New Chat icon button (shows agent selection dropdown)
+    # New Chat icon button: choose provider to start a new agent session
     let iconBtnSize = 28
     let iconBtnX = bounds.x + bounds.w - iconBtnSize - 8
     let iconBtnY = bounds.y + (HeaderHeight - iconBtnSize) div 2
     let iconBtnBounds = rect(iconBtnX, iconBtnY, iconBtnSize, iconBtnSize)
     if iconBtnBounds.contains(point(e.x, e.y)):
-      if panel.onNewChatMenu != nil:
-        panel.onNewChatMenu(e.x, e.y)
+      if panel.onAgentMenu != nil:
+        panel.onAgentMenu(e.x, e.y)
       return true
 
-    if e.y >= inputY:
+    # Model selection dropdown (left) and preset toggle (right) above input box
+    if panel.showModelControls:
+      let toolbarY = inputY + 4
+      let modelBtnBounds = rect(bounds.x + MessagePadding, toolbarY, ModelButtonWidth, ToolbarHeight - 2)
+      if modelBtnBounds.contains(point(e.x, e.y)):
+        if panel.onModelMenu != nil:
+          panel.onModelMenu(e.x, e.y)
+        return true
+      let presetBtnBounds = rect(bounds.x + bounds.w - MessagePadding - PresetButtonWidth, toolbarY, PresetButtonWidth, ToolbarHeight - 2)
+      if presetBtnBounds.contains(point(e.x, e.y)):
+        if panel.onToggleModelPreset != nil:
+          panel.onToggleModelPreset()
+        return true
+
+    let inputContentTop = if panel.showModelControls: inputY + ToolbarHeight else: inputY
+    if e.y >= inputContentTop:
       panel.focused = true
       panel.cursorVisible = true
       panel.lastBlinkTick = getTicks()
@@ -351,6 +385,16 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
     let iconBtnX = bounds.x + bounds.w - iconBtnSize - 8
     let iconBtnY = bounds.y + (HeaderHeight - iconBtnSize) div 2
     panel.hoverNewChat = rect(iconBtnX, iconBtnY, iconBtnSize, iconBtnSize).contains(point(e.x, e.y))
+    panel.hoverAgentMenu = panel.hoverNewChat
+    panel.hoverModelPreset = false
+    panel.hoverModelMenu = false
+    if panel.showModelControls:
+      let inputY = bounds.y + bounds.h - InputHeight
+      let toolbarY = inputY + 4
+      let modelBtnBounds = rect(bounds.x + MessagePadding, toolbarY, ModelButtonWidth, ToolbarHeight - 2)
+      panel.hoverModelMenu = modelBtnBounds.contains(point(e.x, e.y))
+      let presetBtnBounds = rect(bounds.x + bounds.w - MessagePadding - PresetButtonWidth, toolbarY, PresetButtonWidth, ToolbarHeight - 2)
+      panel.hoverModelPreset = presetBtnBounds.contains(point(e.x, e.y))
     if panel.isStreaming:
       let stopX = bounds.x + bounds.w - ButtonWidth * 2 - 16
       panel.hoverStop = rect(stopX, btnY, ButtonWidth, ButtonHeight).contains(point(e.x, e.y))
@@ -446,7 +490,7 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   discard font.drawText(bounds.x + 12, headerTextY, "AI Chat", textC, color(0, 0, 0, 0))
   if panel.subtitle.len > 0:
     let subtitleW = font.measureText(panel.subtitle).w
-    let subtitleX = bounds.x + bounds.w - 44 - subtitleW
+    let subtitleX = bounds.x + bounds.w - 108 - subtitleW
     let minSubtitleX = bounds.x + 80
     if subtitleX >= minSubtitleX:
       discard font.drawText(subtitleX, headerTextY, panel.subtitle, textMuted, color(0, 0, 0, 0))
@@ -537,11 +581,35 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   fillRect(rect(bounds.x, inputY, bounds.w, InputHeight), headerBg)
   fillRect(rect(bounds.x, inputY, bounds.w, 1), borderC)
 
+  # Model toolbar above input box (built-in agent only)
+  if panel.showModelControls:
+    let toolbarY = inputY + 4
+    let modelBtnBounds = rect(bounds.x + MessagePadding, toolbarY, ModelButtonWidth, ToolbarHeight - 2)
+    let modelBtnBorderC = if panel.hoverModelMenu: accentC else: borderC
+    fillRect(modelBtnBounds, bg)
+    fillRect(rect(modelBtnBounds.x, modelBtnBounds.y, modelBtnBounds.w, 1), modelBtnBorderC)
+    fillRect(rect(modelBtnBounds.x, modelBtnBounds.y + modelBtnBounds.h - 1, modelBtnBounds.w, 1), modelBtnBorderC)
+    fillRect(rect(modelBtnBounds.x, modelBtnBounds.y, 1, modelBtnBounds.h), modelBtnBorderC)
+    fillRect(rect(modelBtnBounds.x + modelBtnBounds.w - 1, modelBtnBounds.y, 1, modelBtnBounds.h), modelBtnBorderC)
+    let modelLabel = panel.modelButtonLabel
+    discard font.drawText(modelBtnBounds.x + 8, modelBtnBounds.y + (modelBtnBounds.h - fm.lineHeight) div 2, modelLabel, textC, color(0, 0, 0, 0))
+
+    let presetBtnBounds = rect(bounds.x + bounds.w - MessagePadding - PresetButtonWidth, toolbarY, PresetButtonWidth, ToolbarHeight - 2)
+    let presetBtnBorderC = if panel.hoverModelPreset: accentC else: borderC
+    fillRect(presetBtnBounds, bg)
+    fillRect(rect(presetBtnBounds.x, presetBtnBounds.y, presetBtnBounds.w, 1), presetBtnBorderC)
+    fillRect(rect(presetBtnBounds.x, presetBtnBounds.y + presetBtnBounds.h - 1, presetBtnBounds.w, 1), presetBtnBorderC)
+    fillRect(rect(presetBtnBounds.x, presetBtnBounds.y, 1, presetBtnBounds.h), presetBtnBorderC)
+    fillRect(rect(presetBtnBounds.x + presetBtnBounds.w - 1, presetBtnBounds.y, 1, presetBtnBounds.h), presetBtnBorderC)
+    let presetLabel = if panel.modelPreset.toLowerAscii() == "heavyweight": "H" else: "L"
+    let presetW = font.measureText(presetLabel).w
+    discard font.drawText(presetBtnBounds.x + (presetBtnBounds.w - presetW) div 2, presetBtnBounds.y + (presetBtnBounds.h - fm.lineHeight) div 2, presetLabel, textC, color(0, 0, 0, 0))
+
   let inputBounds = rect(
     bounds.x + MessagePadding,
-    inputY + 6,
+    inputY + ToolbarHeight + 6,
     bounds.w - MessagePadding * 2,
-    InputHeight - 12
+    InputHeight - ToolbarHeight - 12
   )
   fillRect(inputBounds, bg)
   let inputBorderColor = if panel.focused: accentC else: borderC

@@ -9,6 +9,7 @@ else:
   import std/posix
 import ../channel_spsc
 import ../core/config
+import builtin_ai
 import git as gitcmd
 
 type
@@ -368,7 +369,7 @@ proc handleAgentJson(t: AIThread, p: Process, j: JsonNode,
 proc buildAICommand(config: AppConfig): tuple[cmd: string, args: seq[string], error: string] =
   ## Build the ACP-compatible command for the configured AI provider.
   ## Falls back to config.aiCommand for unknown providers or custom setups.
-  let provider = config.aiProvider.toLowerAscii()
+  let provider = config.aiAgent.toLowerAscii()
 
   case provider
   of "", "kimi":
@@ -403,12 +404,14 @@ proc buildAICommand(config: AppConfig): tuple[cmd: string, args: seq[string], er
     result.cmd = parts[0]
     result.args = if parts.len > 1: parts[1..^1] else: @[]
   else:
+    if isHttpAgent(provider):
+      return ("", @[], provider.capitalizeAscii() & " is a built-in HTTP provider; set aiBaseUrl and aiApiKey")
     if config.aiCommand.len > 0:
       let parts = config.aiCommand.splitWhitespace()
       result.cmd = parts[0]
       result.args = if parts.len > 1: parts[1..^1] else: @[]
     else:
-      return ("", @[], "Unsupported AI provider: " & config.aiProvider & "; set aiCommand or choose a built-in provider")
+      return ("", @[], "Unsupported AI provider: " & config.aiAgent & "; set aiCommand or choose a built-in provider")
 
 proc shutdownAIProcess(p: Process, readerChan: var SPSChannel[string],
                        readerThread: var Thread[ReaderThreadArgs]) =
@@ -431,7 +434,40 @@ proc shutdownAIProcess(p: Process, readerChan: var SPSChannel[string],
   readerChan.close()
   joinThread(readerThread)
 
+proc runBuiltinAI(t: AIThread) {.thread.} =
+  ## Worker path for the built-in HTTP agent.
+  t.isReady.store(true, moRelease)
+  t.sendResponse(AIMessage(kind: amkReady))
+  while true:
+    var req: AIMessage
+    while not channel_spsc.tryReceive(t.reqChan, req):
+      if t.reqChan.isClosed or t.shuttingDown.load(moAcquire):
+        return
+      sleep(1)
+    if t.shuttingDown.load(moAcquire):
+      return
+    case req.kind
+    of amkSendMessage:
+      let answer = doChatCompletion(t.config, req.text)
+      if answer.startsWith("HTTP error") or answer.startsWith("Request failed") or answer.startsWith("Unexpected response"):
+        t.sendResponse(AIMessage(kind: amkError, error: answer))
+      else:
+        t.sendResponse(AIMessage(kind: amkResponseChunk, text: answer))
+        t.sendResponse(AIMessage(kind: amkResponseDone))
+    of amkNewSession, amkClearSession:
+      discard
+    of amkShutdown:
+      break
+    of amkCancel:
+      discard
+    else:
+      discard
+
 proc aiThreadProc(t: AIThread) {.thread.} =
+  if isHttpAgent(t.config.aiAgent):
+    runBuiltinAI(t)
+    return
+
   let (cmd, args, cmdError) = buildAICommand(t.config)
   if cmd.len == 0:
     t.sendResponse(AIMessage(kind: amkError, error: cmdError))

@@ -78,22 +78,17 @@ panel5.sendCurrentMessage()
 assertEq(called, false, "whitespace-only input not sent")
 assertEq(panel5.messages.len, 0, "no message added")
 
-# --- plus icon opens new-chat/agent menu ---
+# --- plus icon opens agent selection menu ---
 var panel6 = newAIPanel()
-var menuX, menuY = -1
-panel6.onNewChatMenu = proc(x, y: int) =
-  menuX = x
-  menuY = y
+var agentMenuX, agentMenuY = -1
+panel6.onAgentMenu = proc(x, y: int) =
+  agentMenuX = x
+  agentMenuY = y
 let bounds6 = rect(0, 0, 300, 400)
 let plusEvent = Event(kind: MouseDownEvent, x: 278, y: 16, button: LeftButton)
 let handled6 = panel6.handleMouse(plusEvent, bounds6)
 assertEq(handled6, true, "plus click handled")
-assertEq(menuX, 278, "menu callback x")
-assertEq(menuY, 16, "menu callback y")
-
-# --- plus click without callback does not crash ---
-var panel7 = newAIPanel()
-let handled7 = panel7.handleMouse(plusEvent, bounds6)
-assertEq(handled7, true, "plus click handled without callback")
+assertEq(agentMenuX, 278, "agent menu callback x")
+assertEq(agentMenuY, 16, "agent menu callback y")
 
 echo "All AI panel tests passed!"

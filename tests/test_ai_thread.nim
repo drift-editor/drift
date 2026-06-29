@@ -33,7 +33,7 @@ assertEq(isPathInsideWorkspace(fileInside, root & "/"), true, "root with trailin
 # We cannot call the private buildAICommand directly, but we can verify newAIThread
 # accepts a config and the unsupported-provider path produces an error response.
 var cfg = defaultConfig()
-cfg.aiProvider = "openai"
+cfg.aiAgent = "unsupported_provider"
 cfg.aiModel = "gpt-4"
 var thread = newAIThread(cfg)
 var foundError = false
@@ -52,7 +52,7 @@ assertEq(foundError, true, "unsupported provider reported as error")
 thread.shutdown()
 
 # Kimi provider starts without immediate error (we won't wait for ready; just verify construction)
-cfg.aiProvider = "kimi"
+cfg.aiAgent = "kimi"
 var thread2 = newAIThread(cfg)
 thread2.shutdown()
 

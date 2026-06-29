@@ -14,11 +14,19 @@ type
     dapServer*: string
     dapConfig*: JsonNode  # Server-specific DAP configuration
     aiEnabled*: bool
-    aiProvider*: string
+    aiAgent*: string
     aiApiKey*: string
     aiModel*: string
     aiBaseUrl*: string
     aiCommand*: string
+    aiModelPreset*: string
+    aiBuiltinModelProvider*: string
+    aiBuiltinModel*: string
+    aiLightweightModelProvider*: string
+    aiLightweightModel*: string
+    aiHeavyweightModelProvider*: string
+    aiHeavyweightModel*: string
+    aiEnabledModels*: seq[string]  # Empty = all enabled; format "providerId/model"
 
 proc configDir*(): string =
   getConfigDir() / "drift"
@@ -37,9 +45,16 @@ proc defaultConfig*(): AppConfig =
     dapServer: "nim_debug_adapter",
     dapConfig: newJObject(),
     aiEnabled: true,
-    aiProvider: "kimi",
+    aiAgent: "kimi",
     aiModel: "kimi-for-coding",
-    aiCommand: ""
+    aiCommand: "",
+    aiModelPreset: "lightweight",
+    aiBuiltinModelProvider: "deepseek",
+    aiBuiltinModel: "deepseek-v4-flash",
+    aiLightweightModelProvider: "deepseek",
+    aiLightweightModel: "deepseek-v4-flash",
+    aiHeavyweightModelProvider: "deepseek",
+    aiHeavyweightModel: "deepseek-v4-pro"
   )
 
 proc loadConfig*(): AppConfig =
@@ -72,8 +87,8 @@ proc loadConfig*(): AppConfig =
       result.dapConfig = newJObject()
     if j.hasKey("aiEnabled"):
       result.aiEnabled = j["aiEnabled"].getBool()
-    if j.hasKey("aiProvider"):
-      result.aiProvider = j["aiProvider"].getStr()
+    if j.hasKey("aiAgent"):
+      result.aiAgent = j["aiAgent"].getStr()
     if j.hasKey("aiApiKey"):
       result.aiApiKey = j["aiApiKey"].getStr()
     if j.hasKey("aiModel"):
@@ -82,15 +97,43 @@ proc loadConfig*(): AppConfig =
       result.aiBaseUrl = j["aiBaseUrl"].getStr()
     if j.hasKey("aiCommand"):
       result.aiCommand = j["aiCommand"].getStr()
+    if j.hasKey("aiModelPreset"):
+      result.aiModelPreset = j["aiModelPreset"].getStr()
+    if j.hasKey("aiBuiltinModelProvider"):
+      result.aiBuiltinModelProvider = j["aiBuiltinModelProvider"].getStr()
+    if j.hasKey("aiBuiltinModel"):
+      result.aiBuiltinModel = j["aiBuiltinModel"].getStr()
+    if j.hasKey("aiLightweightModelProvider"):
+      result.aiLightweightModelProvider = j["aiLightweightModelProvider"].getStr()
+    if j.hasKey("aiLightweightModel"):
+      result.aiLightweightModel = j["aiLightweightModel"].getStr()
+    if j.hasKey("aiHeavyweightModelProvider"):
+      result.aiHeavyweightModelProvider = j["aiHeavyweightModelProvider"].getStr()
+    if j.hasKey("aiHeavyweightModel"):
+      result.aiHeavyweightModel = j["aiHeavyweightModel"].getStr()
+    if j.hasKey("aiEnabledModels") and j["aiEnabledModels"].kind == JArray:
+      result.aiEnabledModels = @[]
+      for item in j["aiEnabledModels"]:
+        if item.kind == JString:
+          result.aiEnabledModels.add(item.getStr())
   except CatchableError:
     discard
 
 proc aiDisplayName*(config: AppConfig): string =
-  ## Human-readable name for the active AI provider/model.
-  let base = if config.aiProvider.len > 0: config.aiProvider.capitalizeAscii() else: "Kimi"
+  ## Human-readable name for the active AI agent/model.
+  let base = if config.aiAgent.len > 0: config.aiAgent.capitalizeAscii() else: "Kimi"
   if config.aiModel.len > 0:
     return base & " (" & config.aiModel & ")"
   return base
+
+proc effectiveBuiltinModel*(config: AppConfig): tuple[provider, model: string] =
+  ## Resolve lightweight/heavyweight preset to a built-in model provider/model pair.
+  let preset = config.aiModelPreset.toLowerAscii()
+  if preset == "lightweight" and config.aiLightweightModel.len > 0:
+    return (config.aiLightweightModelProvider, config.aiLightweightModel)
+  if preset == "heavyweight" and config.aiHeavyweightModel.len > 0:
+    return (config.aiHeavyweightModelProvider, config.aiHeavyweightModel)
+  return (config.aiBuiltinModelProvider, config.aiBuiltinModel)
 
 proc saveConfig*(config: AppConfig) =
   createDir(configDir())
@@ -104,10 +147,18 @@ proc saveConfig*(config: AppConfig) =
     "dapServer": config.dapServer,
     "dapConfig": config.dapConfig,
     "aiEnabled": config.aiEnabled,
-    "aiProvider": config.aiProvider,
+    "aiAgent": config.aiAgent,
     "aiApiKey": config.aiApiKey,
     "aiModel": config.aiModel,
     "aiBaseUrl": config.aiBaseUrl,
-    "aiCommand": config.aiCommand
+    "aiCommand": config.aiCommand,
+    "aiModelPreset": config.aiModelPreset,
+    "aiBuiltinModelProvider": config.aiBuiltinModelProvider,
+    "aiBuiltinModel": config.aiBuiltinModel,
+    "aiLightweightModelProvider": config.aiLightweightModelProvider,
+    "aiLightweightModel": config.aiLightweightModel,
+    "aiHeavyweightModelProvider": config.aiHeavyweightModelProvider,
+    "aiHeavyweightModel": config.aiHeavyweightModel,
+    "aiEnabledModels": config.aiEnabledModels
   }
   writeFile(configPath(), $j & "\n")

@@ -328,6 +328,15 @@ proc handleInput*(dialog: InputDialog, event: Event): bool =
       dialog.cursorVisible = true
       dialog.lastBlinkTick = getTicks()
       return true
+    of KeyV:
+      let pasteMod = when defined(macosx): GuiPressed else: CtrlPressed
+      if pasteMod in event.mods:
+        let text = getClipboardText()
+        if text.len > 0:
+          dialog.text.add(text)
+          dialog.cursorVisible = true
+          dialog.lastBlinkTick = getTicks()
+        return true
     else:
       discard
   of TextInputEvent:

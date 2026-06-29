@@ -5,9 +5,9 @@ import uirelays
 import chronos
 from pixie import readImage
 import widgets/[synedit, terminal]
-import ../ui/[tabs, command_palette, search_panel, notification, dialog, context_menu, file_explorer, git_panel, welcome_screen, theme, hover_tooltip, file_dialog, statusbar, icons, theme_loader, theme_selector, location_picker, node, diagnostics_panel, ai_panel, debug_panel, debug_sidebar]
+import ../ui/[tabs, command_palette, search_panel, notification, dialog, context_menu, file_explorer, git_panel, welcome_screen, theme, hover_tooltip, file_dialog, statusbar, icons, theme_loader, theme_selector, location_picker, node, diagnostics_panel, ai_panel, debug_panel, debug_sidebar, model_config_dialog]
 import explorer_context
-import ../services/[lsp_thread, lsp_client, ai_thread, ai_model_detector]
+import ../services/[lsp_thread, lsp_client, ai_thread, ai_model_detector, builtin_ai]
 import ../services/dap_thread
 import ../services/git as gitcmd
 import ../core/types
@@ -38,6 +38,7 @@ type
 
   App* = ref object
     config: cfg.AppConfig
+    initialAiAgent: string  ## Loaded default agent; not persisted when user switches agents at runtime.
     width, height: int
     font: Font
     fm: FontMetrics
@@ -85,6 +86,7 @@ type
     lspMenu: ContextMenu
     branchMenu: ContextMenu
     inputDialog: InputDialog
+    modelConfigDialog: ModelConfigDialog
     welcomeScreen: WelcomeScreen
     fileWatcher: FileWatcher
     tooltip: Tooltip
@@ -188,74 +190,127 @@ proc setTheme*(app: App, name: string) =
     app.diffView.rightEd.theme = driftSyneditTheme()
     app.diffView.applyDecorations()
 
+proc saveAppConfig(app: App) =
+  ## Persist config but keep the originally-loaded default agent,
+  ## so runtime agent switches do not alter the saved default.
+  var saved = app.config
+  saved.aiAgent = app.initialAiAgent
+  cfg.saveConfig(saved)
+
 proc applyTheme*(app: App, name: string) =
   if name.len == 0 or app.config.themeName == name:
     return
   app.setTheme(name)
   app.config.themeName = name
-  saveConfig(app.config)
+  saveAppConfig(app)
 
-type ProviderDef* = object
+type AgentDef* = object
   id*: string
   label*: string
 
-const CommonProviders* = [
-  ProviderDef(id: "kimi", label: "Kimi"),
-  ProviderDef(id: "claude", label: "Claude Code"),
-  ProviderDef(id: "opencode", label: "OpenCode"),
-  ProviderDef(id: "gemini", label: "Gemini"),
-  ProviderDef(id: "codex", label: "Codex"),
-  ProviderDef(id: "cursor", label: "Cursor"),
-  ProviderDef(id: "custom", label: "Custom"),
+const CommonAgents* = [
+  AgentDef(id: "kimi", label: "Kimi"),
+  AgentDef(id: "claude", label: "Claude Code"),
+  AgentDef(id: "opencode", label: "OpenCode"),
+  AgentDef(id: "gemini", label: "Gemini"),
+  AgentDef(id: "codex", label: "Codex"),
+  AgentDef(id: "cursor", label: "Cursor"),
+  AgentDef(id: "builtin", label: "Built-in"),
+  AgentDef(id: "custom", label: "Custom"),
 ]
 
-proc providerLabel(providerId: string): string =
-  if providerId.len == 0:
+proc agentLabel(agentId: string): string =
+  if agentId.len == 0:
     return "Kimi"
-  for p in CommonProviders:
-    if p.id == providerId:
-      return p.label
-  return providerId.capitalizeAscii()
+  for a in CommonAgents:
+    if a.id == agentId:
+      return a.label
+  return agentId.capitalizeAscii()
 
 proc aiSubtitle(config: cfg.AppConfig): string =
-  let provider = providerLabel(config.aiProvider)
-  let detected = detectAIModel(config.aiProvider, getCurrentDir())
+  let agent = agentLabel(config.aiAgent)
+  if config.aiAgent.toLowerAscii() == "builtin":
+    let (providerId, model) = cfg.effectiveBuiltinModel(config)
+    if model.len > 0:
+      return agent & " — " & providerLabel(providerId) & " / " & model
+    return agent
+  let detected = detectAIModel(config.aiAgent, getCurrentDir())
   let model = if detected.len > 0: detected else: config.aiModel
   if model.len > 0:
-    return provider & " — " & model
-  return provider
+    return agent & " — " & model
+  return agent
 
-proc applyProvider(app: App, providerId: string) =
-  ## Apply a provider switch and restart the AI thread.
+proc restartAiThreadIfRunning(app: App) =
+  if app.aiThread != nil:
+    app.aiThread.shutdown()
+    app.aiThread = nil
+    app.aiPanel.clearChat()
+    try:
+      app.aiThread = newAIThread(app.config)
+    except CatchableError as e:
+      stderr.writeLine("[app] Failed to restart AI thread: " & e.msg)
+      discard app.notificationManager.error("Failed to restart AI: " & e.msg)
+
+proc promptApiKey(app: App, onConfirmed: proc() = nil) =
+  app.inputDialog.title = "API Key"
+  let (providerId, _) = cfg.effectiveBuiltinModel(app.config)
+  app.inputDialog.prompt = "Enter API key for " & providerLabel(providerId) & ":"
+  app.inputDialog.text = app.config.aiApiKey
+  app.inputDialog.centerOnScreen(app.width, app.height)
+  app.inputDialog.onResult = proc(confirmed: bool, text: string) =
+    if confirmed:
+      app.config.aiApiKey = text
+      saveAppConfig(app)
+      if onConfirmed != nil:
+        onConfirmed()
+  app.inputDialog.show()
+
+proc ensureBuiltinApiKey(app: App, onReady: proc() = nil) =
+  if not isHttpAgent(app.config.aiAgent) or app.config.aiApiKey.len > 0:
+    if onReady != nil:
+      onReady()
+    return
+  if app.inputDialog.isVisible:
+    return
+  app.promptApiKey(proc() =
+    if onReady != nil:
+      onReady()
+  )
+
+proc applyAgent(app: App, agentId: string) =
+  ## Apply an agent switch and restart the AI thread.
   ## This is a runtime/session switch and does not persist to config.
-  stderr.writeLine("[app] switching AI provider to: " & providerId)
-  app.config.aiProvider = providerId
+  stderr.writeLine("[app] switching AI agent to: " & agentId)
+  app.config.aiAgent = agentId
   if app.aiThread != nil:
     app.aiThread.shutdown()
     app.aiThread = nil
   app.aiPanel.clearChat()
-  app.aiPanel.placeholder = "Ask " & providerLabel(providerId) & "..."
+  app.aiPanel.placeholder = "Ask " & agentLabel(agentId) & "..."
   app.aiPanel.subtitle = aiSubtitle(app.config)
-  try:
-    app.aiThread = newAIThread(app.config)
-  except CatchableError as e:
-    stderr.writeLine("[app] Failed to start AI thread: " & e.msg)
-    discard app.notificationManager.error("Failed to start AI: " & e.msg)
+  app.aiPanel.showModelControls = isHttpAgent(agentId)
+  app.ensureBuiltinApiKey(proc() =
+    try:
+      app.aiThread = newAIThread(app.config)
+    except CatchableError as e:
+      stderr.writeLine("[app] Failed to start AI thread: " & e.msg)
+      discard app.notificationManager.error("Failed to start AI: " & e.msg)
+  )
 
-proc selectProvider(app: App, providerId: string)
+proc selectAgent(app: App, agentId: string)
 
-proc makeSelectProviderAction(app: App, providerId: string): proc() =
+proc makeSelectAgentAction(app: App, agentId: string): proc() =
   ## Factory to avoid Nim's loop-variable closure capture bug.
-  result = proc() = app.selectProvider(providerId)
+  result = proc() = app.selectAgent(agentId)
 
-proc selectProvider(app: App, providerId: string) =
+proc selectAgent(app: App, agentId: string) =
   ## Switch the active AI provider and start a fresh chat session.
-  if app.config.aiProvider == providerId:
+  if app.config.aiAgent == agentId:
     app.aiPanel.clearChat()
     if app.aiPanel.onNewSession != nil:
       app.aiPanel.onNewSession()
     return
-  if providerId == "custom" and app.config.aiCommand.len == 0:
+  if agentId == "custom" and app.config.aiCommand.len == 0:
     app.inputDialog.title = "Custom AI Command"
     app.inputDialog.prompt = "Enter ACP command (e.g. /path/to/agent acp):"
     app.inputDialog.text = ""
@@ -263,17 +318,86 @@ proc selectProvider(app: App, providerId: string) =
     app.inputDialog.onResult = proc(confirmed: bool, text: string) =
       if confirmed and text.len > 0:
         app.config.aiCommand = text
-        app.applyProvider(providerId)
+        saveAppConfig(app)
+        app.applyAgent(agentId)
     app.inputDialog.show()
     return
-  app.applyProvider(providerId)
+  app.applyAgent(agentId)
+
+proc selectModel(app: App, providerId, model: string)
+
+proc makeSelectModelAction(app: App, providerId, model: string): proc() =
+  ## Factory to avoid Nim's loop-variable closure capture bug.
+  result = proc() = app.selectModel(providerId, model)
+
+proc selectModel(app: App, providerId, model: string) =
+  ## Switch the active built-in model provider/model for the current preset and restart if needed.
+  if app.config.aiModelPreset.toLowerAscii() == "heavyweight":
+    app.config.aiHeavyweightModelProvider = providerId
+    app.config.aiHeavyweightModel = model
+  else:
+    app.config.aiLightweightModelProvider = providerId
+    app.config.aiLightweightModel = model
+  app.config.aiBaseUrl = defaultBaseUrl(providerId)
+  app.aiPanel.subtitle = aiSubtitle(app.config)
+  saveAppConfig(app)
+  app.ensureBuiltinApiKey(proc() = app.restartAiThreadIfRunning())
+
+proc showModelConfigDialog(app: App) =
+  app.modelConfigDialog.centerOnScreen(app.width, app.height)
+  app.modelConfigDialog.setModels(allBuiltinModels(), app.config.aiEnabledModels)
+  app.modelConfigDialog.onResult = proc(confirmed: bool, enabledModels: seq[string]) =
+    if confirmed:
+      app.config.aiEnabledModels = enabledModels
+      app.aiPanel.subtitle = aiSubtitle(app.config)
+      saveAppConfig(app)
+  app.modelConfigDialog.show()
+
+proc isModelEnabled(config: cfg.AppConfig, providerId, model: string): bool =
+  if config.aiEnabledModels.len == 0:
+    return true
+  return (providerId & "/" & model) in config.aiEnabledModels
+
+proc showModelMenu(app: App, x, y: int) =
+  app.contextMenu.clear()
+  let allModels = allBuiltinModels()
+  var visibleModels: seq[tuple[providerId, model, label: string]]
+  for m in allModels:
+    if isModelEnabled(app.config, m.providerId, m.model):
+      visibleModels.add(m)
+  if visibleModels.len == 0:
+    app.contextMenu.addItem("none", "No models enabled", nil)
+  else:
+    for m in visibleModels:
+      app.contextMenu.addItem(m.providerId & "/" & m.model, m.label, app.makeSelectModelAction(m.providerId, m.model))
+  app.contextMenu.addSeparator()
+  app.contextMenu.addItem("configure", "Configure Models...", proc() = app.showModelConfigDialog())
+  app.contextMenu.showAt(x, y, app.width, app.height)
+  discard app.gi.consume()
+
+proc promptBaseUrl(app: App) =
+  app.inputDialog.title = "Base URL"
+  app.inputDialog.prompt = "Enter base URL (empty = default):"
+  let (providerId, _) = cfg.effectiveBuiltinModel(app.config)
+  app.inputDialog.text = if app.config.aiBaseUrl.len > 0: app.config.aiBaseUrl else: defaultBaseUrl(providerId)
+  app.inputDialog.centerOnScreen(app.width, app.height)
+  app.inputDialog.onResult = proc(confirmed: bool, text: string) =
+    if confirmed:
+      app.config.aiBaseUrl = text
+      saveAppConfig(app)
+  app.inputDialog.show()
 
 proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
-  var app = App(config: config, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel("Ask " & providerLabel(config.aiProvider) & "..."), debugState: dssOff, debugStopThreadId: 0, breakpoints: @[])
+  var app = App(config: config, initialAiAgent: config.aiAgent, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel("Ask " & agentLabel(config.aiAgent) & "..."), debugState: dssOff, debugStopThreadId: 0, breakpoints: @[])
   app.aiPanel.subtitle = aiSubtitle(config)
-  app.aiPanel.onSend = proc(text: string) =
+  app.aiPanel.modelPreset = config.aiModelPreset
+  proc sendAiPrompt(promptText: string) =
     if app.aiThread == nil:
       app.aiThread = newAIThread(app.config)
+    app.aiThread.sendMessage(promptText)
+    app.aiPanel.isStreaming = true
+
+  app.aiPanel.onSend = proc(text: string) =
     # Build prompt with editor context
     var promptText = text
     if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
@@ -282,8 +406,7 @@ proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
         let content = b.ed.fullText()
         if content.len > 0:
           promptText = "Current file: " & b.path & "\n```\n" & content & "\n```\n\n" & text
-    app.aiThread.sendMessage(promptText)
-    app.aiPanel.isStreaming = true
+    sendAiPrompt(promptText)
   app.aiPanel.onNewSession = proc() =
     if app.aiThread != nil:
       app.aiThread.newSession()
@@ -291,12 +414,26 @@ proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
   app.aiPanel.onStop = proc() =
     if app.aiThread != nil:
       app.aiThread.cancel()
-  app.aiPanel.onNewChatMenu = proc(x, y: int) =
+  app.aiPanel.showModelControls = isHttpAgent(config.aiAgent)
+  app.aiPanel.onAgentMenu = proc(x, y: int) =
     app.contextMenu.clear()
-    for p in CommonProviders:
-      app.contextMenu.addItem(p.id, p.label, app.makeSelectProviderAction(p.id))
+    for p in CommonAgents:
+      app.contextMenu.addItem(p.id, p.label, app.makeSelectAgentAction(p.id))
+    if isHttpAgent(app.config.aiAgent):
+      app.contextMenu.addSeparator()
+      app.contextMenu.addItem("apikey", "Set API Key", proc() = app.promptApiKey())
+      app.contextMenu.addItem("baseurl", "Set Base URL", proc() = app.promptBaseUrl())
     app.contextMenu.showAt(x, y, app.width, app.height)
     discard app.gi.consume()
+  app.aiPanel.onModelMenu = proc(x, y: int) =
+    app.showModelMenu(x, y)
+  app.aiPanel.onToggleModelPreset = proc() =
+    app.config.aiModelPreset = if app.config.aiModelPreset.toLowerAscii() == "lightweight": "heavyweight" else: "lightweight"
+    app.aiPanel.modelPreset = app.config.aiModelPreset
+    app.aiPanel.subtitle = aiSubtitle(app.config)
+    saveAppConfig(app)
+    if isHttpAgent(app.config.aiAgent):
+      app.ensureBuiltinApiKey(proc() = app.restartAiThreadIfRunning())
   return app
 
 proc clearHoverState(app: App; clearPending: bool = true) =
@@ -707,7 +844,7 @@ proc lspExeFor(serverName: string): string =
 proc restartLSP(app: App, serverName: string) =
   app.lspServer = serverName
   app.config.lspServer = serverName
-  saveConfig(app.config)
+  saveAppConfig(app)
   # Stop existing LSP
   if app.lspThread != nil:
     app.lspThread.shutdown()
@@ -1439,6 +1576,7 @@ proc init*(app: App) =
   app.lspMenu = newContextMenu(app.uiFont)
   app.branchMenu = newContextMenu(app.uiFont)
   app.inputDialog = newInputDialog("", "", app.uiFont)
+  app.modelConfigDialog = newModelConfigDialog(app.uiFont)
 
   # Welcome screen
   app.welcomeScreen = newWelcomeScreen()
@@ -1752,6 +1890,8 @@ proc run*(app: App) =
 
     # 1. Modals always win first
     if app.inputDialog.isVisible and app.inputDialog.handleInput(e):
+      discard app.gi.consume()
+    elif app.modelConfigDialog.isVisible and app.modelConfigDialog.handleInput(e):
       discard app.gi.consume()
     elif app.dialogManager.isModalActive() and app.dialogManager.handleInput(e):
       discard app.gi.consume()
@@ -2552,6 +2692,7 @@ proc run*(app: App) =
       app.commandPalette.render(app.uiFont, rect(0, 0, app.width, app.height))
     app.dialogManager.render(app.width, app.height)
     app.inputDialog.render(app.width, app.height)
+    app.modelConfigDialog.render(app.width, app.height)
     app.contextMenu.render()
     app.lspMenu.render()
     app.branchMenu.render()
