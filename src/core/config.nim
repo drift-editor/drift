@@ -18,6 +18,7 @@ type
     aiApiKey*: string
     aiModel*: string
     aiBaseUrl*: string
+    aiCommand*: string
 
 proc configDir*(): string =
   getConfigDir() / "drift"
@@ -35,7 +36,10 @@ proc defaultConfig*(): AppConfig =
     lspConfig: newJObject(),
     dapServer: "nim_debug_adapter",
     dapConfig: newJObject(),
-    aiEnabled: true
+    aiEnabled: true,
+    aiProvider: "kimi",
+    aiModel: "kimi-for-coding",
+    aiCommand: ""
   )
 
 proc loadConfig*(): AppConfig =
@@ -76,14 +80,17 @@ proc loadConfig*(): AppConfig =
       result.aiModel = j["aiModel"].getStr()
     if j.hasKey("aiBaseUrl"):
       result.aiBaseUrl = j["aiBaseUrl"].getStr()
+    if j.hasKey("aiCommand"):
+      result.aiCommand = j["aiCommand"].getStr()
   except CatchableError:
     discard
 
 proc aiDisplayName*(config: AppConfig): string =
-  ## Human-readable name for the active AI provider.
-  if config.aiProvider.len > 0:
-    return config.aiProvider.capitalizeAscii()
-  return "Kimi"
+  ## Human-readable name for the active AI provider/model.
+  let base = if config.aiProvider.len > 0: config.aiProvider.capitalizeAscii() else: "Kimi"
+  if config.aiModel.len > 0:
+    return base & " (" & config.aiModel & ")"
+  return base
 
 proc saveConfig*(config: AppConfig) =
   createDir(configDir())
@@ -100,6 +107,7 @@ proc saveConfig*(config: AppConfig) =
     "aiProvider": config.aiProvider,
     "aiApiKey": config.aiApiKey,
     "aiModel": config.aiModel,
-    "aiBaseUrl": config.aiBaseUrl
+    "aiBaseUrl": config.aiBaseUrl,
+    "aiCommand": config.aiCommand
   }
   writeFile(configPath(), $j & "\n")

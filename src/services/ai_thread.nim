@@ -366,13 +366,49 @@ proc handleAgentJson(t: AIThread, p: Process, j: JsonNode,
 # ---------------------------------------------------------------------------
 
 proc buildAICommand(config: AppConfig): tuple[cmd: string, args: seq[string], error: string] =
+  ## Build the ACP-compatible command for the configured AI provider.
+  ## Falls back to config.aiCommand for unknown providers or custom setups.
   let provider = config.aiProvider.toLowerAscii()
-  if provider.len > 0 and provider != "kimi":
-    return ("", @[], "Unsupported AI provider: " & config.aiProvider)
-  result.args = @["acp"]
-  if config.aiModel.len > 0:
-    result.args = @["--model", config.aiModel, "acp"]
-  result.cmd = "kimi"
+
+  case provider
+  of "", "kimi":
+    result.args = @["acp"]
+    if config.aiModel.len > 0:
+      result.args = @["--model", config.aiModel, "acp"]
+    result.cmd = "kimi"
+  of "claude":
+    # Requires the claude-code-acp bridge (e.g. npm install -g @anthropic-ai/claude-code-acp)
+    result.cmd = "claude-code-acp"
+    result.args = @[]
+  of "opencode":
+    # Requires the opencode-ai ACP adapter (e.g. npx -y opencode-ai acp)
+    result.cmd = "npx"
+    result.args = @["-y", "opencode-ai", "acp"]
+  of "gemini":
+    # Requires the Gemini CLI with ACP support (e.g. gemini --acp)
+    result.cmd = "gemini"
+    result.args = @["--acp"]
+  of "codex":
+    # Requires the OpenAI Codex CLI with ACP support (e.g. codex acp)
+    result.cmd = "codex"
+    result.args = @["acp"]
+  of "cursor":
+    # Requires the Cursor CLI/agent with ACP support (e.g. cursor-agent acp)
+    result.cmd = "cursor-agent"
+    result.args = @["acp"]
+  of "custom":
+    if config.aiCommand.len == 0:
+      return ("", @[], "Custom AI provider requires aiCommand")
+    let parts = config.aiCommand.splitWhitespace()
+    result.cmd = parts[0]
+    result.args = if parts.len > 1: parts[1..^1] else: @[]
+  else:
+    if config.aiCommand.len > 0:
+      let parts = config.aiCommand.splitWhitespace()
+      result.cmd = parts[0]
+      result.args = if parts.len > 1: parts[1..^1] else: @[]
+    else:
+      return ("", @[], "Unsupported AI provider: " & config.aiProvider & "; set aiCommand or choose a built-in provider")
 
 proc shutdownAIProcess(p: Process, readerChan: var SPSChannel[string],
                        readerThread: var Thread[ReaderThreadArgs]) =

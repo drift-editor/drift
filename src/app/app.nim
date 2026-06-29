@@ -7,7 +7,7 @@ from pixie import readImage
 import widgets/[synedit, terminal]
 import ../ui/[tabs, command_palette, search_panel, notification, dialog, context_menu, file_explorer, git_panel, welcome_screen, theme, hover_tooltip, file_dialog, statusbar, icons, theme_loader, theme_selector, location_picker, node, diagnostics_panel, ai_panel, debug_panel, debug_sidebar]
 import explorer_context
-import ../services/[lsp_thread, lsp_client, ai_thread]
+import ../services/[lsp_thread, lsp_client, ai_thread, ai_model_detector]
 import ../services/dap_thread
 import ../services/git as gitcmd
 import ../core/types
@@ -195,8 +195,82 @@ proc applyTheme*(app: App, name: string) =
   app.config.themeName = name
   saveConfig(app.config)
 
+type ProviderDef* = object
+  id*: string
+  label*: string
+
+const CommonProviders* = [
+  ProviderDef(id: "kimi", label: "Kimi"),
+  ProviderDef(id: "claude", label: "Claude Code"),
+  ProviderDef(id: "opencode", label: "OpenCode"),
+  ProviderDef(id: "gemini", label: "Gemini"),
+  ProviderDef(id: "codex", label: "Codex"),
+  ProviderDef(id: "cursor", label: "Cursor"),
+  ProviderDef(id: "custom", label: "Custom"),
+]
+
+proc providerLabel(providerId: string): string =
+  if providerId.len == 0:
+    return "Kimi"
+  for p in CommonProviders:
+    if p.id == providerId:
+      return p.label
+  return providerId.capitalizeAscii()
+
+proc aiSubtitle(config: cfg.AppConfig): string =
+  let provider = providerLabel(config.aiProvider)
+  let detected = detectAIModel(config.aiProvider, getCurrentDir())
+  let model = if detected.len > 0: detected else: config.aiModel
+  if model.len > 0:
+    return provider & " — " & model
+  return provider
+
+proc applyProvider(app: App, providerId: string) =
+  ## Apply a provider switch and restart the AI thread.
+  ## This is a runtime/session switch and does not persist to config.
+  stderr.writeLine("[app] switching AI provider to: " & providerId)
+  app.config.aiProvider = providerId
+  if app.aiThread != nil:
+    app.aiThread.shutdown()
+    app.aiThread = nil
+  app.aiPanel.clearChat()
+  app.aiPanel.placeholder = "Ask " & providerLabel(providerId) & "..."
+  app.aiPanel.subtitle = aiSubtitle(app.config)
+  try:
+    app.aiThread = newAIThread(app.config)
+  except CatchableError as e:
+    stderr.writeLine("[app] Failed to start AI thread: " & e.msg)
+    discard app.notificationManager.error("Failed to start AI: " & e.msg)
+
+proc selectProvider(app: App, providerId: string)
+
+proc makeSelectProviderAction(app: App, providerId: string): proc() =
+  ## Factory to avoid Nim's loop-variable closure capture bug.
+  result = proc() = app.selectProvider(providerId)
+
+proc selectProvider(app: App, providerId: string) =
+  ## Switch the active AI provider and start a fresh chat session.
+  if app.config.aiProvider == providerId:
+    app.aiPanel.clearChat()
+    if app.aiPanel.onNewSession != nil:
+      app.aiPanel.onNewSession()
+    return
+  if providerId == "custom" and app.config.aiCommand.len == 0:
+    app.inputDialog.title = "Custom AI Command"
+    app.inputDialog.prompt = "Enter ACP command (e.g. /path/to/agent acp):"
+    app.inputDialog.text = ""
+    app.inputDialog.centerOnScreen(app.width, app.height)
+    app.inputDialog.onResult = proc(confirmed: bool, text: string) =
+      if confirmed and text.len > 0:
+        app.config.aiCommand = text
+        app.applyProvider(providerId)
+    app.inputDialog.show()
+    return
+  app.applyProvider(providerId)
+
 proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
-  var app = App(config: config, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel("Ask " & cfg.aiDisplayName(config) & "..."), debugState: dssOff, debugStopThreadId: 0, breakpoints: @[])
+  var app = App(config: config, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel("Ask " & providerLabel(config.aiProvider) & "..."), debugState: dssOff, debugStopThreadId: 0, breakpoints: @[])
+  app.aiPanel.subtitle = aiSubtitle(config)
   app.aiPanel.onSend = proc(text: string) =
     if app.aiThread == nil:
       app.aiThread = newAIThread(app.config)
@@ -217,6 +291,12 @@ proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
   app.aiPanel.onStop = proc() =
     if app.aiThread != nil:
       app.aiThread.cancel()
+  app.aiPanel.onNewChatMenu = proc(x, y: int) =
+    app.contextMenu.clear()
+    for p in CommonProviders:
+      app.contextMenu.addItem(p.id, p.label, app.makeSelectProviderAction(p.id))
+    app.contextMenu.showAt(x, y, app.width, app.height)
+    discard app.gi.consume()
   return app
 
 proc clearHoverState(app: App; clearPending: bool = true) =

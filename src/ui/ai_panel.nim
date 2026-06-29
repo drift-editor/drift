@@ -40,9 +40,11 @@ type
     onSend*: proc(text: string)
     onNewSession*: proc()
     onStop*: proc()
+    onNewChatMenu*: proc(x, y: int)
     hoverNewChat*: bool
     hoverStop*: bool
     placeholder*: string
+    subtitle*: string
     userScrolledUp*: bool
     rightClickedMessageIndex*: int
 
@@ -59,9 +61,11 @@ proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
     onSend: nil,
     onNewSession: nil,
     onStop: nil,
+    onNewChatMenu: nil,
     hoverNewChat: false,
     hoverStop: false,
     placeholder: placeholder,
+    subtitle: "",
     userScrolledUp: false,
     rightClickedMessageIndex: -1
   )
@@ -322,15 +326,14 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
           panel.onStop()
         return true
 
-    # New Chat icon button
+    # New Chat icon button (shows agent selection dropdown)
     let iconBtnSize = 28
     let iconBtnX = bounds.x + bounds.w - iconBtnSize - 8
     let iconBtnY = bounds.y + (HeaderHeight - iconBtnSize) div 2
     let iconBtnBounds = rect(iconBtnX, iconBtnY, iconBtnSize, iconBtnSize)
     if iconBtnBounds.contains(point(e.x, e.y)):
-      panel.clearChat()
-      if panel.onNewSession != nil:
-        panel.onNewSession()
+      if panel.onNewChatMenu != nil:
+        panel.onNewChatMenu(e.x, e.y)
       return true
 
     if e.y >= inputY:
@@ -357,9 +360,8 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
 
   if e.kind == MouseWheelEvent:
     let oldOffset = panel.scrollOffset
-    panel.scrollOffset += e.y * 20
-    if panel.scrollOffset < 0:
-      panel.scrollOffset = 0
+    let newOffset = int64(panel.scrollOffset) + int64(e.y) * 20
+    panel.scrollOffset = int(clamp(newOffset, 0, int64(high(int))))
     # userScrolledUp is determined at render time after clamping to content height
     if panel.scrollOffset != oldOffset:
       return true
@@ -442,6 +444,12 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   fillRect(rect(bounds.x, bounds.y + HeaderHeight - 1, bounds.w, 1), borderC)
   let headerTextY = bounds.y + (HeaderHeight - fm.lineHeight) div 2
   discard font.drawText(bounds.x + 12, headerTextY, "AI Chat", textC, color(0, 0, 0, 0))
+  if panel.subtitle.len > 0:
+    let subtitleW = font.measureText(panel.subtitle).w
+    let subtitleX = bounds.x + bounds.w - 44 - subtitleW
+    let minSubtitleX = bounds.x + 80
+    if subtitleX >= minSubtitleX:
+      discard font.drawText(subtitleX, headerTextY, panel.subtitle, textMuted, color(0, 0, 0, 0))
 
   # Header buttons
   let btnY = bounds.y + (HeaderHeight - ButtonHeight) div 2
