@@ -91,4 +91,40 @@ assertEq(handled6, true, "plus click handled")
 assertEq(agentMenuX, 278, "agent menu callback x")
 assertEq(agentMenuY, 16, "agent menu callback y")
 
+# --- UTF-8 / CJK input handling ---
+var panel7 = newAIPanel()
+panel7.focused = true
+let cjkText = "你好世界"
+# TextInputEvent carries one UTF-8 codepoint (up to 4 bytes) per event.
+proc makeTextEvent(s: string): Event =
+  var ev = Event(kind: TextInputEvent)
+  for i in 0 ..< min(s.len, 4):
+    ev.text[i] = s[i]
+  ev
+
+for cp in ["你", "好", "世", "界"]:
+  discard panel7.handleTextInput(makeTextEvent(cp))
+assertEq(panel7.inputText, cjkText, "CJK text inserted")
+assertEq(panel7.cursorPos, cjkText.len, "cursor after CJK is byte length")
+
+# Move cursor left by one character (one CJK rune = 3 bytes)
+discard panel7.handleKey(Event(kind: KeyDownEvent, key: KeyLeft, mods: {}))
+assertEq(panel7.cursorPos, cjkText.len - 3, "left arrow moves one rune boundary")
+
+# Backspace removes the whole rune before cursor
+discard panel7.handleKey(Event(kind: KeyDownEvent, key: KeyBackspace, mods: {}))
+assertEq(panel7.inputText, "你好界", "backspace removes one CJK rune")
+assertEq(panel7.cursorPos, cjkText.len - 6, "cursor after backspace")
+
+# Delete removes the rune at cursor
+panel7.inputText = "你好世界"
+panel7.cursorPos = 3
+discard panel7.handleKey(Event(kind: KeyDownEvent, key: KeyDelete, mods: {}))
+assertEq(panel7.inputText, "你世界", "delete removes CJK rune at cursor")
+
+# Right arrow moves to next rune boundary
+panel7.cursorPos = 0
+discard panel7.handleKey(Event(kind: KeyDownEvent, key: KeyRight, mods: {}))
+assertEq(panel7.cursorPos, 3, "right arrow moves one rune boundary")
+
 echo "All AI panel tests passed!"

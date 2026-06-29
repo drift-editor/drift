@@ -1,7 +1,7 @@
 ## AI Chat Panel
 ## Right-side panel for AI conversations
 
-import std/strutils
+import std/[strutils, unicode]
 import uirelays
 import uirelays/screen
 import uirelays/input
@@ -17,7 +17,35 @@ const
   ButtonWidth = 90
   ButtonHeight = 24
   ModelButtonWidth = 80
-  PresetButtonWidth = 32
+  PresetButtonWidth = 50
+
+proc runeByteOffsets(s: string): seq[int] =
+  ## Return the byte offset of every rune boundary, starting with 0 and ending with s.len.
+  result.add(0)
+  var off = 0
+  for r in s.toRunes():
+    off += ($r).len
+    result.add(off)
+
+proc prevRuneBoundary(s: string, bytePos: int): int =
+  ## Return the byte index of the rune boundary immediately before bytePos.
+  if bytePos <= 0:
+    return 0
+  let offsets = runeByteOffsets(s)
+  for i in countdown(offsets.len - 2, 0):
+    if offsets[i] < bytePos:
+      return offsets[i]
+  return 0
+
+proc nextRuneBoundary(s: string, bytePos: int): int =
+  ## Return the byte index immediately after the rune at bytePos.
+  if bytePos >= s.len:
+    return s.len
+  let offsets = runeByteOffsets(s)
+  for off in offsets:
+    if off > bytePos:
+      return off
+  return s.len
 
 type
   ChatMessage* = object
@@ -45,11 +73,11 @@ type
     onStop*: proc()
     onAgentMenu*: proc(x, y: int)
     onModelMenu*: proc(x, y: int)
-    onToggleModelPreset*: proc()
+    onPresetMenu*: proc(x, y: int)
     hoverNewChat*: bool
     hoverAgentMenu*: bool
     hoverStop*: bool
-    hoverModelPreset*: bool
+    hoverPresetMenu*: bool
     hoverModelMenu*: bool
     placeholder*: string
     subtitle*: string
@@ -74,11 +102,11 @@ proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
     onStop: nil,
     onAgentMenu: nil,
     onModelMenu: nil,
-    onToggleModelPreset: nil,
+    onPresetMenu: nil,
     hoverNewChat: false,
     hoverAgentMenu: false,
     hoverStop: false,
-    hoverModelPreset: false,
+    hoverPresetMenu: false,
     hoverModelMenu: false,
     placeholder: placeholder,
     subtitle: "",
@@ -243,32 +271,28 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
     return false
   of KeyBackspace:
     if panel.cursorPos > 0:
-      if panel.cursorPos < panel.inputText.len:
-        panel.inputText = panel.inputText[0..<panel.cursorPos - 1] & panel.inputText[panel.cursorPos..^1]
-      else:
-        panel.inputText.setLen(panel.inputText.len - 1)
-      dec panel.cursorPos
+      let start = prevRuneBoundary(panel.inputText, panel.cursorPos)
+      panel.inputText = panel.inputText[0..<start] & panel.inputText[panel.cursorPos..^1]
+      panel.cursorPos = start
       panel.cursorVisible = true
       panel.lastBlinkTick = getTicks()
       return true
   of KeyDelete:
     if panel.cursorPos < panel.inputText.len:
-      if panel.cursorPos == 0:
-        panel.inputText = panel.inputText[1..^1]
-      else:
-        panel.inputText = panel.inputText[0..<panel.cursorPos] & panel.inputText[panel.cursorPos + 1..^1]
+      let endPos = nextRuneBoundary(panel.inputText, panel.cursorPos)
+      panel.inputText = panel.inputText[0..<panel.cursorPos] & panel.inputText[endPos..^1]
       panel.cursorVisible = true
       panel.lastBlinkTick = getTicks()
       return true
   of KeyLeft:
     if panel.cursorPos > 0:
-      dec panel.cursorPos
+      panel.cursorPos = prevRuneBoundary(panel.inputText, panel.cursorPos)
       panel.cursorVisible = true
       panel.lastBlinkTick = getTicks()
       return true
   of KeyRight:
     if panel.cursorPos < panel.inputText.len:
-      inc panel.cursorPos
+      panel.cursorPos = nextRuneBoundary(panel.inputText, panel.cursorPos)
       panel.cursorVisible = true
       panel.lastBlinkTick = getTicks()
       return true
@@ -355,7 +379,7 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
         panel.onAgentMenu(e.x, e.y)
       return true
 
-    # Model selection dropdown (left) and preset toggle (right) above input box
+    # Model selection dropdown (left) and preset dropdown (right) above input box
     if panel.showModelControls:
       let toolbarY = inputY + 4
       let modelBtnBounds = rect(bounds.x + MessagePadding, toolbarY, ModelButtonWidth, ToolbarHeight - 2)
@@ -365,8 +389,8 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
         return true
       let presetBtnBounds = rect(bounds.x + bounds.w - MessagePadding - PresetButtonWidth, toolbarY, PresetButtonWidth, ToolbarHeight - 2)
       if presetBtnBounds.contains(point(e.x, e.y)):
-        if panel.onToggleModelPreset != nil:
-          panel.onToggleModelPreset()
+        if panel.onPresetMenu != nil:
+          panel.onPresetMenu(e.x, e.y)
         return true
 
     let inputContentTop = if panel.showModelControls: inputY + ToolbarHeight else: inputY
@@ -386,7 +410,7 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
     let iconBtnY = bounds.y + (HeaderHeight - iconBtnSize) div 2
     panel.hoverNewChat = rect(iconBtnX, iconBtnY, iconBtnSize, iconBtnSize).contains(point(e.x, e.y))
     panel.hoverAgentMenu = panel.hoverNewChat
-    panel.hoverModelPreset = false
+    panel.hoverPresetMenu = false
     panel.hoverModelMenu = false
     if panel.showModelControls:
       let inputY = bounds.y + bounds.h - InputHeight
@@ -394,7 +418,7 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
       let modelBtnBounds = rect(bounds.x + MessagePadding, toolbarY, ModelButtonWidth, ToolbarHeight - 2)
       panel.hoverModelMenu = modelBtnBounds.contains(point(e.x, e.y))
       let presetBtnBounds = rect(bounds.x + bounds.w - MessagePadding - PresetButtonWidth, toolbarY, PresetButtonWidth, ToolbarHeight - 2)
-      panel.hoverModelPreset = presetBtnBounds.contains(point(e.x, e.y))
+      panel.hoverPresetMenu = presetBtnBounds.contains(point(e.x, e.y))
     if panel.isStreaming:
       let stopX = bounds.x + bounds.w - ButtonWidth * 2 - 16
       panel.hoverStop = rect(stopX, btnY, ButtonWidth, ButtonHeight).contains(point(e.x, e.y))
@@ -404,7 +428,12 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
 
   if e.kind == MouseWheelEvent:
     let oldOffset = panel.scrollOffset
-    let newOffset = int64(panel.scrollOffset) + int64(e.y) * 20
+    # Avoid overflow when scrollOffset is the sentinel high(int) used before render clamping.
+    var base = int64(panel.scrollOffset)
+    if base >= int64(high(int)) - 1_000_000:
+      base = int64(high(int)) - 1_000_000
+    let wheelDelta = clamp(int64(e.y), -1_000_000, 1_000_000)
+    let newOffset = base + wheelDelta * 20
     panel.scrollOffset = int(clamp(newOffset, 0, int64(high(int))))
     # userScrolledUp is determined at render time after clamping to content height
     if panel.scrollOffset != oldOffset:
@@ -595,13 +624,16 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
     discard font.drawText(modelBtnBounds.x + 8, modelBtnBounds.y + (modelBtnBounds.h - fm.lineHeight) div 2, modelLabel, textC, color(0, 0, 0, 0))
 
     let presetBtnBounds = rect(bounds.x + bounds.w - MessagePadding - PresetButtonWidth, toolbarY, PresetButtonWidth, ToolbarHeight - 2)
-    let presetBtnBorderC = if panel.hoverModelPreset: accentC else: borderC
+    let presetBtnBorderC = if panel.hoverPresetMenu: accentC else: borderC
     fillRect(presetBtnBounds, bg)
     fillRect(rect(presetBtnBounds.x, presetBtnBounds.y, presetBtnBounds.w, 1), presetBtnBorderC)
     fillRect(rect(presetBtnBounds.x, presetBtnBounds.y + presetBtnBounds.h - 1, presetBtnBounds.w, 1), presetBtnBorderC)
     fillRect(rect(presetBtnBounds.x, presetBtnBounds.y, 1, presetBtnBounds.h), presetBtnBorderC)
     fillRect(rect(presetBtnBounds.x + presetBtnBounds.w - 1, presetBtnBounds.y, 1, presetBtnBounds.h), presetBtnBorderC)
-    let presetLabel = if panel.modelPreset.toLowerAscii() == "heavyweight": "H" else: "L"
+    let presetLabel = case panel.modelPreset.toLowerAscii()
+      of "auto": "Auto"
+      of "heavyweight": "Heavy"
+      else: "Light"
     let presetW = font.measureText(presetLabel).w
     discard font.drawText(presetBtnBounds.x + (presetBtnBounds.w - presetW) div 2, presetBtnBounds.y + (presetBtnBounds.h - fm.lineHeight) div 2, presetLabel, textC, color(0, 0, 0, 0))
 

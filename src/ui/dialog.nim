@@ -1,6 +1,7 @@
 ## Dialog Component
 ## Modal dialogs for user confirmation and input (uirelays version)
 
+import std/unicode
 import uirelays
 import uirelays/screen
 import uirelays/input
@@ -324,7 +325,12 @@ proc handleInput*(dialog: InputDialog, event: Event): bool =
       return true
     of KeyBackspace:
       if dialog.text.len > 0:
-        dialog.text = dialog.text[0 ..< ^1]
+        let runes = dialog.text.toRunes()
+        if runes.len > 0:
+          var s = ""
+          for i in 0 ..< runes.len - 1:
+            s.add($runes[i])
+          dialog.text = s
       dialog.cursorVisible = true
       dialog.lastBlinkTick = getTicks()
       return true

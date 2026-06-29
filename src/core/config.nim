@@ -127,8 +127,10 @@ proc aiDisplayName*(config: AppConfig): string =
   return base
 
 proc effectiveBuiltinModel*(config: AppConfig): tuple[provider, model: string] =
-  ## Resolve lightweight/heavyweight preset to a built-in model provider/model pair.
+  ## Resolve lightweight/heavyweight/auto preset to a built-in model provider/model pair.
   let preset = config.aiModelPreset.toLowerAscii()
+  if preset == "auto" and config.aiBuiltinModel.len > 0:
+    return (config.aiBuiltinModelProvider, config.aiBuiltinModel)
   if preset == "lightweight" and config.aiLightweightModel.len > 0:
     return (config.aiLightweightModelProvider, config.aiLightweightModel)
   if preset == "heavyweight" and config.aiHeavyweightModel.len > 0:

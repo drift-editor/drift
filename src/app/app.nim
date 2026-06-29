@@ -5,7 +5,7 @@ import uirelays
 import chronos
 from pixie import readImage
 import widgets/[synedit, terminal]
-import ../ui/[tabs, command_palette, search_panel, notification, dialog, context_menu, file_explorer, git_panel, welcome_screen, theme, hover_tooltip, file_dialog, statusbar, icons, theme_loader, theme_selector, location_picker, node, diagnostics_panel, ai_panel, debug_panel, debug_sidebar, model_config_dialog]
+import ../ui/[tabs, command_palette, search_panel, notification, dialog, context_menu, file_explorer, git_panel, welcome_screen, theme, hover_tooltip, file_dialog, statusbar, icons, theme_loader, theme_selector, location_picker, node, diagnostics_panel, ai_panel, debug_panel, debug_sidebar, model_config_dialog, model_select_dialog]
 import explorer_context
 import ../services/[lsp_thread, lsp_client, ai_thread, ai_model_detector, builtin_ai]
 import ../services/dap_thread
@@ -87,6 +87,7 @@ type
     branchMenu: ContextMenu
     inputDialog: InputDialog
     modelConfigDialog: ModelConfigDialog
+    modelSelectDialog: ModelSelectDialog
     welcomeScreen: WelcomeScreen
     fileWatcher: FileWatcher
     tooltip: Tooltip
@@ -325,23 +326,81 @@ proc selectAgent(app: App, agentId: string) =
   app.applyAgent(agentId)
 
 proc selectModel(app: App, providerId, model: string)
+proc selectModelForPreset(app: App, preset, providerId, model: string)
 
 proc makeSelectModelAction(app: App, providerId, model: string): proc() =
   ## Factory to avoid Nim's loop-variable closure capture bug.
   result = proc() = app.selectModel(providerId, model)
 
-proc selectModel(app: App, providerId, model: string) =
-  ## Switch the active built-in model provider/model for the current preset and restart if needed.
-  if app.config.aiModelPreset.toLowerAscii() == "heavyweight":
+proc makeSelectModelAction(app: App, providerId, model, targetPreset: string): proc() =
+  ## Factory for setting a model on a specific preset.
+  result = proc() = app.selectModelForPreset(targetPreset, providerId, model)
+
+proc selectModelForPreset(app: App, preset, providerId, model: string) =
+  ## Set the provider/model for a specific lightweight/heavyweight/auto preset.
+  let p = preset.toLowerAscii()
+  case p
+  of "auto":
+    app.config.aiBuiltinModelProvider = providerId
+    app.config.aiBuiltinModel = model
+  of "heavyweight":
     app.config.aiHeavyweightModelProvider = providerId
     app.config.aiHeavyweightModel = model
   else:
     app.config.aiLightweightModelProvider = providerId
     app.config.aiLightweightModel = model
-  app.config.aiBaseUrl = defaultBaseUrl(providerId)
+  # Model selection does not change a configured base URL. Only fill in the
+  # default when the user hasn't set one yet.
+  if app.config.aiBaseUrl.len == 0:
+    app.config.aiBaseUrl = defaultBaseUrl(providerId)
   app.aiPanel.subtitle = aiSubtitle(app.config)
   saveAppConfig(app)
-  app.ensureBuiltinApiKey(proc() = app.restartAiThreadIfRunning())
+  # Only restart the thread if the changed preset is currently active.
+  if isHttpAgent(app.config.aiAgent) and app.config.aiModelPreset.toLowerAscii() == p:
+    app.ensureBuiltinApiKey(proc() = app.restartAiThreadIfRunning())
+
+proc selectModel(app: App, providerId, model: string) =
+  ## Switch the active built-in model provider/model for the current preset and restart if needed.
+  app.selectModelForPreset(app.config.aiModelPreset, providerId, model)
+
+proc selectPreset(app: App, preset: string) =
+  ## Switch the lightweight/heavyweight/auto preset at runtime. Not persisted.
+  app.config.aiModelPreset = preset
+  app.aiPanel.modelPreset = preset
+  app.aiPanel.subtitle = aiSubtitle(app.config)
+  if isHttpAgent(app.config.aiAgent):
+    app.ensureBuiltinApiKey(proc() = app.restartAiThreadIfRunning())
+
+proc showModelMenu(app: App, x, y: int, targetPreset: string = "")
+
+proc isModelEnabled(config: cfg.AppConfig, providerId, model: string): bool =
+  if config.aiEnabledModels.len == 0:
+    return true
+  return (providerId & "/" & model) in config.aiEnabledModels
+
+proc showModelConfigDialog(app: App)
+
+proc showModelSelectDialog(app: App, targetPreset, title: string) =
+  ## Show a centered modal dialog for choosing the model assigned to a preset.
+  app.modelSelectDialog.title = title
+  app.modelSelectDialog.setModels(allBuiltinModels(), app.config.aiEnabledModels)
+  app.modelSelectDialog.centerOnScreen(app.width, app.height)
+  app.modelSelectDialog.onResult = proc(confirmed: bool, providerId, model: string) =
+    if confirmed:
+      app.selectModelForPreset(targetPreset, providerId, model)
+  app.modelSelectDialog.show()
+  discard app.gi.consume()
+
+proc showPresetMenu(app: App, x, y: int) =
+  app.contextMenu.clear()
+  app.contextMenu.addItem("auto", "Auto", proc() = app.selectPreset("auto"))
+  app.contextMenu.addItem("lightweight", "Light", proc() = app.selectPreset("lightweight"))
+  app.contextMenu.addItem("heavyweight", "Heavy", proc() = app.selectPreset("heavyweight"))
+  app.contextMenu.addSeparator()
+  app.contextMenu.addItem("set-lightweight", "Set Lightweight Model", proc() = app.showModelSelectDialog("lightweight", "Set Lightweight Model"))
+  app.contextMenu.addItem("set-heavyweight", "Set Heavyweight Model", proc() = app.showModelSelectDialog("heavyweight", "Set Heavyweight Model"))
+  app.contextMenu.showAt(x, y, app.width, app.height)
+  discard app.gi.consume()
 
 proc showModelConfigDialog(app: App) =
   app.modelConfigDialog.centerOnScreen(app.width, app.height)
@@ -353,12 +412,7 @@ proc showModelConfigDialog(app: App) =
       saveAppConfig(app)
   app.modelConfigDialog.show()
 
-proc isModelEnabled(config: cfg.AppConfig, providerId, model: string): bool =
-  if config.aiEnabledModels.len == 0:
-    return true
-  return (providerId & "/" & model) in config.aiEnabledModels
-
-proc showModelMenu(app: App, x, y: int) =
+proc showModelMenu(app: App, x, y: int, targetPreset: string = "") =
   app.contextMenu.clear()
   let allModels = allBuiltinModels()
   var visibleModels: seq[tuple[providerId, model, label: string]]
@@ -369,7 +423,11 @@ proc showModelMenu(app: App, x, y: int) =
     app.contextMenu.addItem("none", "No models enabled", nil)
   else:
     for m in visibleModels:
-      app.contextMenu.addItem(m.providerId & "/" & m.model, m.label, app.makeSelectModelAction(m.providerId, m.model))
+      let action = if targetPreset.len > 0:
+        app.makeSelectModelAction(m.providerId, m.model, targetPreset)
+      else:
+        app.makeSelectModelAction(m.providerId, m.model)
+      app.contextMenu.addItem(m.providerId & "/" & m.model, m.label, action)
   app.contextMenu.addSeparator()
   app.contextMenu.addItem("configure", "Configure Models...", proc() = app.showModelConfigDialog())
   app.contextMenu.showAt(x, y, app.width, app.height)
@@ -427,13 +485,8 @@ proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
     discard app.gi.consume()
   app.aiPanel.onModelMenu = proc(x, y: int) =
     app.showModelMenu(x, y)
-  app.aiPanel.onToggleModelPreset = proc() =
-    app.config.aiModelPreset = if app.config.aiModelPreset.toLowerAscii() == "lightweight": "heavyweight" else: "lightweight"
-    app.aiPanel.modelPreset = app.config.aiModelPreset
-    app.aiPanel.subtitle = aiSubtitle(app.config)
-    saveAppConfig(app)
-    if isHttpAgent(app.config.aiAgent):
-      app.ensureBuiltinApiKey(proc() = app.restartAiThreadIfRunning())
+  app.aiPanel.onPresetMenu = proc(x, y: int) =
+    app.showPresetMenu(x, y)
   return app
 
 proc clearHoverState(app: App; clearPending: bool = true) =
@@ -1577,6 +1630,7 @@ proc init*(app: App) =
   app.branchMenu = newContextMenu(app.uiFont)
   app.inputDialog = newInputDialog("", "", app.uiFont)
   app.modelConfigDialog = newModelConfigDialog(app.uiFont)
+  app.modelSelectDialog = newModelSelectDialog(app.uiFont)
 
   # Welcome screen
   app.welcomeScreen = newWelcomeScreen()
@@ -1890,6 +1944,8 @@ proc run*(app: App) =
 
     # 1. Modals always win first
     if app.inputDialog.isVisible and app.inputDialog.handleInput(e):
+      discard app.gi.consume()
+    elif app.modelSelectDialog.isVisible and app.modelSelectDialog.handleInput(e):
       discard app.gi.consume()
     elif app.modelConfigDialog.isVisible and app.modelConfigDialog.handleInput(e):
       discard app.gi.consume()
@@ -2692,6 +2748,7 @@ proc run*(app: App) =
       app.commandPalette.render(app.uiFont, rect(0, 0, app.width, app.height))
     app.dialogManager.render(app.width, app.height)
     app.inputDialog.render(app.width, app.height)
+    app.modelSelectDialog.render(app.width, app.height)
     app.modelConfigDialog.render(app.width, app.height)
     app.contextMenu.render()
     app.lspMenu.render()
