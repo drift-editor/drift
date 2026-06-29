@@ -16,7 +16,7 @@ const
   MaxMessageWidth = 220
   ButtonWidth = 90
   ButtonHeight = 24
-  ModelButtonWidth = 80
+  ModelButtonWidth = 112
 
 proc runeByteOffsets(s: string): seq[int] =
   ## Return the byte offset of every rune boundary, starting with 0 and ending with s.len.
@@ -492,6 +492,7 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   let textMuted = currentTheme.getColor(tcTextSecondary)
   let accentC = currentTheme.getColor(tcAccent)
   let headerBg = currentTheme.getColor(tcBackground)
+  let bgHover = currentTheme.getColor(tcSurfaceHover)
   let fm = font.getFontMetrics()
 
   # Panel background
@@ -526,17 +527,13 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
     let stopW = font.measureText(stopLabel).w
     discard font.drawText(stopBounds.x + (ButtonWidth - stopW) div 2, stopBounds.y + 4, stopLabel, textC, color(0, 0, 0, 0))
 
-  # New Chat icon button
+  # New Chat icon button (soft hover fill, consistent with other icon buttons)
   let iconBtnSize = 28
   let iconBtnX = bounds.x + bounds.w - iconBtnSize - 8
   let iconBtnY = bounds.y + (HeaderHeight - iconBtnSize) div 2
   let iconBtnBounds = rect(iconBtnX, iconBtnY, iconBtnSize, iconBtnSize)
   if panel.hoverNewChat:
-    fillRect(iconBtnBounds, bg)
-    fillRect(rect(iconBtnBounds.x, iconBtnBounds.y, iconBtnBounds.w, 1), accentC)
-    fillRect(rect(iconBtnBounds.x, iconBtnBounds.y + iconBtnBounds.h - 1, iconBtnBounds.w, 1), accentC)
-    fillRect(rect(iconBtnBounds.x, iconBtnBounds.y, 1, iconBtnBounds.h), accentC)
-    fillRect(rect(iconBtnBounds.x + iconBtnBounds.w - 1, iconBtnBounds.y, 1, iconBtnBounds.h), accentC)
+    fillRect(iconBtnBounds, bgHover)
   drawIconCentered(iiAdd, iconBtnBounds)
 
   # Messages area
@@ -595,21 +592,47 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   fillRect(rect(bounds.x, inputY, bounds.w, InputHeight), headerBg)
   fillRect(rect(bounds.x, inputY, bounds.w, 1), borderC)
 
-  # Model toolbar above input box (built-in agent only)
+  # Model selector dropdown above input box (built-in agent only)
   if panel.showModelControls:
     let toolbarY = inputY + 4
     let modelBtnBounds = rect(bounds.x + MessagePadding, toolbarY, ModelButtonWidth, ToolbarHeight - 2)
+    let preset = panel.modelPreset.toLowerAscii()
+    let modelLabel = case preset
+      of "auto": "Auto"
+      of "heavyweight": "Heavy"
+      else: "Light"
+    # Color-coded status dot identifies the active preset at a glance
+    let dotColor = case preset
+      of "auto": currentTheme.getColor(tcInfo)
+      of "heavyweight": currentTheme.getColor(tcWarning)
+      else: currentTheme.getColor(tcSuccess)
+
+    # Background: subtle hover fill makes the control feel interactive
+    let btnBg = if panel.hoverModelMenu: currentTheme.getColor(tcSurfaceHover) else: bg
+    fillRect(modelBtnBounds, btnBg)
+    # Border: accent on hover, normal border otherwise
     let modelBtnBorderC = if panel.hoverModelMenu: accentC else: borderC
-    fillRect(modelBtnBounds, bg)
     fillRect(rect(modelBtnBounds.x, modelBtnBounds.y, modelBtnBounds.w, 1), modelBtnBorderC)
     fillRect(rect(modelBtnBounds.x, modelBtnBounds.y + modelBtnBounds.h - 1, modelBtnBounds.w, 1), modelBtnBorderC)
     fillRect(rect(modelBtnBounds.x, modelBtnBounds.y, 1, modelBtnBounds.h), modelBtnBorderC)
     fillRect(rect(modelBtnBounds.x + modelBtnBounds.w - 1, modelBtnBounds.y, 1, modelBtnBounds.h), modelBtnBorderC)
-    let modelLabel = case panel.modelPreset.toLowerAscii()
-      of "auto": "Auto"
-      of "heavyweight": "Heavy"
-      else: "Light"
-    discard font.drawText(modelBtnBounds.x + 8, modelBtnBounds.y + (modelBtnBounds.h - fm.lineHeight) div 2, modelLabel, textC, color(0, 0, 0, 0))
+
+    let textY = modelBtnBounds.y + (modelBtnBounds.h - fm.lineHeight) div 2
+
+    # Status dot (left)
+    let dotCx = modelBtnBounds.x + 12
+    let dotCy = modelBtnBounds.y + modelBtnBounds.h div 2
+    fillRect(rect(dotCx - 2, dotCy - 2, 4, 4), dotColor)
+
+    # Label
+    discard font.drawText(modelBtnBounds.x + 20, textY, modelLabel, textC, color(0, 0, 0, 0))
+
+    # Vertical separator before the chevron (dropdown affordance)
+    let sepX = modelBtnBounds.x + modelBtnBounds.w - 22
+    fillRect(rect(sepX, modelBtnBounds.y + 4, 1, modelBtnBounds.h - 8), borderC)
+
+    # Chevron-down icon (the dropdown arrow)
+    drawIconCentered(iiChevronDown, rect(sepX + 2, modelBtnBounds.y, 18, modelBtnBounds.h))
 
   let inputBounds = rect(
     bounds.x + MessagePadding,

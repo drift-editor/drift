@@ -166,12 +166,15 @@ proc buildVisibleNodes(explorer: FileExplorer) =
   if explorer.rootNode == nil:
     explorer.visibleNodesDirty = false
     return
+  # The root folder itself is never shown as a row (the header already displays
+  # the project name). Walk only its children so the tree starts with contents.
   proc walk(node: FileNode) =
     explorer.visibleNodes.add(node)
     if node.isExpanded:
       for child in node.children:
         walk(child)
-  walk(explorer.rootNode)
+  for child in explorer.rootNode.children:
+    walk(child)
   explorer.visibleNodesDirty = false
 
 proc newFileExplorer*(): FileExplorer =
@@ -295,7 +298,9 @@ proc handleMouse*(explorer: FileExplorer, e: Event, bounds: Rect): bool =
       let node = explorer.visibleNodes[idx]
       var depth = 0
       var p = node.parent
-      while p != nil:
+      # Stop at the root node so top-level children compute depth 0 (the root
+      # is not rendered as a row).
+      while p != nil and p != explorer.rootNode:
         inc depth
         p = p.parent
       let iconX = bounds.x + PADDING + depth * INDENT_WIDTH
@@ -543,10 +548,15 @@ proc render*(explorer: FileExplorer, bounds: Rect, font: Font) =
   saveState()
   setClipRect(contentBounds)
 
-  # Render tree
+  # Render tree. The root folder is not drawn as a row (the header shows the
+  # project name); its children are rendered directly at depth 0.
   if explorer.rootNode != nil:
     var y = HEADER_HEIGHT + PADDING
-    explorer.rootNode.renderNode(explorer, 0, y, bounds, font)
+    let rootChildren = explorer.rootNode.children
+    for i, child in rootChildren:
+      var cont: seq[bool] = @[]
+      cont.add(i != rootChildren.high)
+      child.renderNode(explorer, 0, y, bounds, font, cont)
 
     # Update max scroll
     let visibleH = bounds.h - HEADER_HEIGHT
