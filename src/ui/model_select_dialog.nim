@@ -1,8 +1,8 @@
 ## Unified model/preset picker dialog
 ##
-## Merges the old preset menu (Auto/Light/Heavy) and the model list into one
-## dialog. The top row selects which preset is being configured; the list shows
-## an "Auto" item plus all models, with Light/Heavy badges on assigned models.
+## Shows an "Auto" item plus all built-in models. Models assigned to the
+## lightweight/heavyweight preset get a badge. Selecting a model triggers an
+## action menu (Set as Light / Set as Heavy / Set API Key) via callback.
 
 import std/[strutils]
 import uirelays
@@ -13,7 +13,6 @@ import theme
 const
   DialogWidth = 420
   DialogHeight = 460
-  TabHeight = 28
   ItemHeight = 28
   ListPadding = 8
   BadgeMargin = 8
@@ -36,14 +35,13 @@ type
     isVisible*: bool
     bounds*: Rect
     font*: Font
-    mode*: string              ## "auto", "lightweight", or "heavyweight": which preset we are configuring
     lightProvider*: string
     lightModel*: string
     heavyProvider*: string
     heavyModel*: string
     selectedIndex*: int
     scrollOffset*: int
-    onSelectMode*: proc(mode: string)
+    onSelectAuto*: proc()
     onSelectModel*: proc(providerId, model: string)
     onConfigure*: proc()
 
@@ -54,14 +52,13 @@ proc newModelSelectDialog*(font: Font): ModelSelectDialog =
     isVisible: false,
     bounds: rect(0, 0, DialogWidth, DialogHeight),
     font: font,
-    mode: "auto",
     lightProvider: "",
     lightModel: "",
     heavyProvider: "",
     heavyModel: "",
     selectedIndex: 0,
     scrollOffset: 0,
-    onSelectMode: nil,
+    onSelectAuto: nil,
     onSelectModel: nil,
     onConfigure: nil
   )
@@ -77,12 +74,6 @@ proc show*(dialog: ModelSelectDialog) =
 
 proc hide*(dialog: ModelSelectDialog) =
   dialog.isVisible = false
-
-proc modeLabel(mode: string): string =
-  case mode.toLowerAscii()
-  of "auto": "Auto"
-  of "heavyweight": "Heavy"
-  else: "Light"
 
 proc setModels*(dialog: ModelSelectDialog,
                 allModels: seq[tuple[providerId, model, label: string]],
@@ -104,18 +95,11 @@ proc isHeavyModel*(dialog: ModelSelectDialog, providerId, model: string): bool =
   providerId.len > 0 and model.len > 0 and
     providerId == dialog.heavyProvider and model == dialog.heavyModel
 
-proc tabBounds(dialog: ModelSelectDialog, index: int): Rect =
-  let tabW = (dialog.bounds.w - ListPadding * 2) div 3
-  result = rect(dialog.bounds.x + ListPadding + index * tabW,
-                dialog.bounds.y + 44,
-                tabW,
-                TabHeight)
-
 proc listY(dialog: ModelSelectDialog): int =
-  dialog.bounds.y + 44 + TabHeight + 8
+  dialog.bounds.y + 44
 
 proc listH(dialog: ModelSelectDialog): int =
-  dialog.bounds.h - (listY(dialog) - dialog.bounds.y) - 16
+  dialog.bounds.h - 44 - 16
 
 proc maxScroll(dialog: ModelSelectDialog): int =
   max(0, dialog.items.len - dialog.listH div ItemHeight)
@@ -142,8 +126,8 @@ proc handleInput*(dialog: ModelSelectDialog, event: Event): bool =
       if dialog.selectedIndex >= 0 and dialog.selectedIndex < dialog.items.len:
         let item = dialog.items[dialog.selectedIndex]
         if item.kind == msiAuto:
-          if dialog.onSelectMode != nil:
-            dialog.onSelectMode("auto")
+          if dialog.onSelectAuto != nil:
+            dialog.onSelectAuto()
         else:
           if dialog.onSelectModel != nil:
             dialog.onSelectModel(item.providerId, item.model)
@@ -173,15 +157,6 @@ proc handleInput*(dialog: ModelSelectDialog, event: Event): bool =
         dialog.onConfigure()
       return true
 
-    # Tab clicks
-    let modes = ["auto", "lightweight", "heavyweight"]
-    for i, m in modes:
-      if dialog.tabBounds(i).contains(point(event.x, event.y)):
-        dialog.mode = m
-        if dialog.onSelectMode != nil:
-          dialog.onSelectMode(m)
-        return true
-
     # List item clicks
     let listY0 = dialog.listY
     let listH0 = dialog.listH
@@ -191,8 +166,8 @@ proc handleInput*(dialog: ModelSelectDialog, event: Event): bool =
       if index >= 0 and index < dialog.items.len:
         let item = dialog.items[index]
         if item.kind == msiAuto:
-          if dialog.onSelectMode != nil:
-            dialog.onSelectMode("auto")
+          if dialog.onSelectAuto != nil:
+            dialog.onSelectAuto()
         else:
           if dialog.onSelectModel != nil:
             dialog.onSelectModel(item.providerId, item.model)
@@ -238,27 +213,8 @@ proc render*(dialog: ModelSelectDialog, viewportW, viewportH: int) =
   fillRect(rect(dialog.bounds.x + dialog.bounds.w - 1, dialog.bounds.y, 1, dialog.bounds.h), borderC)
 
   # Title
-  let titleText = dialog.title & " — " & modeLabel(dialog.mode)
-  discard dialog.font.drawText(dialog.bounds.x + 16, dialog.bounds.y + 12, titleText, textC, bg)
+  discard dialog.font.drawText(dialog.bounds.x + 16, dialog.bounds.y + 12, dialog.title, textC, bg)
   fillRect(rect(dialog.bounds.x, dialog.bounds.y + 40, dialog.bounds.w, 1), borderC)
-
-  # Mode tabs
-  let modes = ["auto", "lightweight", "heavyweight"]
-  let modeLabels = ["Auto", "Light", "Heavy"]
-  for i, m in modes:
-    let tb = dialog.tabBounds(i)
-    let isSelected = dialog.mode.toLowerAscii() == m
-    let tabBg = if isSelected: accentC else: bg
-    let tabFg = if isSelected: color(255, 255, 255, 255) else: textC
-    fillRect(tb, tabBg)
-    fillRect(rect(tb.x, tb.y, tb.w, 1), borderC)
-    fillRect(rect(tb.x, tb.y + tb.h - 1, tb.w, 1), borderC)
-    fillRect(rect(tb.x, tb.y, 1, tb.h), borderC)
-    fillRect(rect(tb.x + tb.w - 1, tb.y, 1, tb.h), borderC)
-    let labelW = dialog.font.measureText(modeLabels[i]).w
-    discard dialog.font.drawText(tb.x + (tb.w - labelW) div 2,
-                                 tb.y + (tb.h - fm.lineHeight) div 2,
-                                 modeLabels[i], tabFg, tabBg)
 
   # List
   let listX = dialog.bounds.x + ListPadding

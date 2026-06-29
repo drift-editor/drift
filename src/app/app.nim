@@ -366,23 +366,41 @@ proc showModelConfigDialog(app: App) =
       saveAppConfig(app)
   app.modelConfigDialog.show()
 
+proc showModelActionMenu(app: App, providerId, model: string)
+
 proc showUnifiedModelDialog(app: App) =
   ## Show the unified model/preset picker dialog.
   app.modelSelectDialog.title = "Model"
-  app.modelSelectDialog.mode = app.config.aiModelPreset
   app.modelSelectDialog.lightProvider = app.config.aiLightweightModelProvider
   app.modelSelectDialog.lightModel = app.config.aiLightweightModel
   app.modelSelectDialog.heavyProvider = app.config.aiHeavyweightModelProvider
   app.modelSelectDialog.heavyModel = app.config.aiHeavyweightModel
   app.modelSelectDialog.setModels(allBuiltinModels(), app.config.aiEnabledModels)
   app.modelSelectDialog.centerOnScreen(app.width, app.height)
-  app.modelSelectDialog.onSelectMode = proc(mode: string) =
-    app.selectPreset(mode)
+  app.modelSelectDialog.onSelectAuto = proc() =
+    app.selectPreset("auto")
   app.modelSelectDialog.onSelectModel = proc(providerId, model: string) =
-    app.selectModelForPreset(app.modelSelectDialog.mode, providerId, model)
+    app.showModelActionMenu(providerId, model)
   app.modelSelectDialog.onConfigure = proc() =
     app.showModelConfigDialog()
   app.modelSelectDialog.show()
+  discard app.gi.consume()
+
+proc showModelActionMenu(app: App, providerId, model: string) =
+  ## Show the action menu for a selected model: set as light/heavy or set API key.
+  app.contextMenu.clear()
+  app.contextMenu.addItem("set-light", "Set as Light Model", proc() =
+    app.selectModelForPreset("lightweight", providerId, model)
+    app.selectPreset("lightweight"))
+  app.contextMenu.addItem("set-heavy", "Set as Heavy Model", proc() =
+    app.selectModelForPreset("heavyweight", providerId, model)
+    app.selectPreset("heavyweight"))
+  app.contextMenu.addSeparator()
+  app.contextMenu.addItem("set-apikey", "Set API Key", proc() =
+    app.config.aiBuiltinModelProvider = providerId
+    app.config.aiBuiltinModel = model
+    app.promptApiKey())
+  app.contextMenu.showAt(app.width div 2, app.height div 2, app.width, app.height)
   discard app.gi.consume()
 
 proc promptBaseUrl(app: App) =
