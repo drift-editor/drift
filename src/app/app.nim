@@ -278,10 +278,11 @@ proc ensureBuiltinApiKey(app: App, onReady: proc() = nil) =
   )
 
 proc applyAgent(app: App, agentId: string) =
-  ## Apply an agent switch and restart the AI thread.
-  ## This is a runtime/session switch and does not persist to config.
+  ## Apply an agent switch, persist it as the new default, and restart the AI thread.
   stderr.writeLine("[app] switching AI agent to: " & agentId)
   app.config.aiAgent = agentId
+  app.initialAiAgent = agentId
+  saveAppConfig(app)
   if app.aiThread != nil:
     app.aiThread.shutdown()
     app.aiThread = nil
