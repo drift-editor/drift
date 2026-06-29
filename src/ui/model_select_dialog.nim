@@ -41,9 +41,10 @@ type
     heavyModel*: string
     selectedIndex*: int
     scrollOffset*: int
+    enabledModels*: seq[string]
     onSelectAuto*: proc()
     onSelectModel*: proc(providerId, model: string)
-    onConfigure*: proc()
+    onToggleModel*: proc(providerId, model: string, enabled: bool)
 
 proc newModelSelectDialog*(font: Font): ModelSelectDialog =
   ModelSelectDialog(
@@ -58,9 +59,10 @@ proc newModelSelectDialog*(font: Font): ModelSelectDialog =
     heavyModel: "",
     selectedIndex: 0,
     scrollOffset: 0,
+    enabledModels: @[],
     onSelectAuto: nil,
     onSelectModel: nil,
-    onConfigure: nil
+    onToggleModel: nil
   )
 
 proc centerOnScreen*(dialog: ModelSelectDialog, screenWidth, screenHeight: int) =
@@ -76,14 +78,11 @@ proc hide*(dialog: ModelSelectDialog) =
   dialog.isVisible = false
 
 proc setModels*(dialog: ModelSelectDialog,
-                allModels: seq[tuple[providerId, model, label: string]],
-                enabledModels: seq[string]) =
+                allModels: seq[tuple[providerId, model, label: string]]) =
   dialog.items = @[]
   dialog.items.add(ModelSelectItem(kind: msiAuto, providerId: "", model: "", label: "Auto"))
-  let enabled = enabledModels.len == 0
   for m in allModels:
-    if enabled or (m.providerId & "/" & m.model) in enabledModels:
-      dialog.items.add(ModelSelectItem(kind: msiModel, providerId: m.providerId, model: m.model, label: m.label))
+    dialog.items.add(ModelSelectItem(kind: msiModel, providerId: m.providerId, model: m.model, label: m.label))
   if dialog.selectedIndex >= dialog.items.len:
     dialog.selectedIndex = max(0, dialog.items.len - 1)
 
@@ -95,6 +94,11 @@ proc isHeavyModel*(dialog: ModelSelectDialog, providerId, model: string): bool =
   providerId.len > 0 and model.len > 0 and
     providerId == dialog.heavyProvider and model == dialog.heavyModel
 
+proc isModelEnabled*(dialog: ModelSelectDialog, providerId, model: string): bool =
+  if dialog.enabledModels.len == 0:
+    return true
+  return (providerId & "/" & model) in dialog.enabledModels
+
 proc listY(dialog: ModelSelectDialog): int =
   dialog.bounds.y + 44
 
@@ -103,14 +107,6 @@ proc listH(dialog: ModelSelectDialog): int =
 
 proc maxScroll(dialog: ModelSelectDialog): int =
   max(0, dialog.items.len - dialog.listH div ItemHeight)
-
-proc configureButtonBounds(dialog: ModelSelectDialog): Rect =
-  let fm = dialog.font.getFontMetrics()
-  let text = "Configure Models..."
-  let size = dialog.font.measureText(text)
-  let x = dialog.bounds.x + dialog.bounds.w - ListPadding - size.w
-  let y = dialog.bounds.y + dialog.bounds.h - 14 - fm.lineHeight * 2 - 4
-  result = rect(x, y, size.w, fm.lineHeight)
 
 proc handleInput*(dialog: ModelSelectDialog, event: Event): bool =
   if not dialog.isVisible:
@@ -149,12 +145,6 @@ proc handleInput*(dialog: ModelSelectDialog, event: Event): bool =
     if event.x < dialog.bounds.x or event.x >= dialog.bounds.x + dialog.bounds.w or
        event.y < dialog.bounds.y or event.y >= dialog.bounds.y + dialog.bounds.h:
       dialog.hide()
-      return true
-
-    # Configure button click
-    if dialog.configureButtonBounds().contains(point(event.x, event.y)):
-      if dialog.onConfigure != nil:
-        dialog.onConfigure()
       return true
 
     # List item clicks
@@ -226,14 +216,26 @@ proc render*(dialog: ModelSelectDialog, viewportW, viewportH: int) =
   for i, item in dialog.items:
     if y + ItemHeight > listY0 and y < listY0 + listH0:
       let isSelected = i == dialog.selectedIndex
+      let isEnabled = item.kind == msiAuto or dialog.isModelEnabled(item.providerId, item.model)
       let rowBg = if isSelected: accentC else: bg
-      let rowFg = if isSelected: color(255, 255, 255, 255) else: textC
+      let rowFg = if isSelected:
+        color(255, 255, 255, 255)
+      elif not isEnabled:
+        textMuted
+      else:
+        textC
       fillRect(rect(listX, y, listW, ItemHeight), rowBg)
-      discard dialog.font.drawText(listX + 8, y + 6, item.label, rowFg, rowBg)
+      let labelX = listX + 8
+      discard dialog.font.drawText(labelX, y + 6, item.label, rowFg, rowBg)
 
-      # Badges for Light / Heavy assignments
+      # Badges for Light / Heavy assignments and disabled indicator
       if item.kind == msiModel:
         var badgeRightX = listX + listW - BadgeMargin
+        if not isEnabled:
+          badgeRightX = renderBadgeRight(dialog.font, "Disabled",
+                                         badgeRightX, y + 4,
+                                         if isSelected: color(255, 255, 255, 60) else: color(120, 120, 120, 60),
+                                         rowFg) - BadgeSpacing
         if dialog.isHeavyModel(item.providerId, item.model):
           badgeRightX = renderBadgeRight(dialog.font, "Heavy",
                                          badgeRightX, y + 4,
@@ -245,10 +247,6 @@ proc render*(dialog: ModelSelectDialog, viewportW, viewportH: int) =
                                    if isSelected: color(255, 255, 255, 60) else: color(accentC.r, accentC.g, accentC.b, 40),
                                    rowFg)
     y += ItemHeight
-
-  # Configure models link
-  let cfgBounds = dialog.configureButtonBounds()
-  discard dialog.font.drawText(cfgBounds.x, cfgBounds.y, "Configure Models...", accentC, bg)
 
   # Hint
   let hint = "Enter to select, Esc to cancel"

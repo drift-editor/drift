@@ -5,7 +5,7 @@ import uirelays
 import chronos
 from pixie import readImage
 import widgets/[synedit, terminal]
-import ../ui/[tabs, command_palette, search_panel, notification, dialog, context_menu, file_explorer, git_panel, welcome_screen, theme, hover_tooltip, file_dialog, statusbar, icons, theme_loader, theme_selector, location_picker, node, diagnostics_panel, ai_panel, debug_panel, debug_sidebar, model_config_dialog, model_select_dialog]
+import ../ui/[tabs, command_palette, search_panel, notification, dialog, context_menu, file_explorer, git_panel, welcome_screen, theme, hover_tooltip, file_dialog, statusbar, icons, theme_loader, theme_selector, location_picker, node, diagnostics_panel, ai_panel, debug_panel, debug_sidebar, model_select_dialog]
 import explorer_context
 import ../services/[lsp_thread, lsp_client, ai_thread, ai_model_detector, builtin_ai]
 import ../services/dap_thread
@@ -86,7 +86,6 @@ type
     lspMenu: ContextMenu
     branchMenu: ContextMenu
     inputDialog: InputDialog
-    modelConfigDialog: ModelConfigDialog
     modelSelectDialog: ModelSelectDialog
     welcomeScreen: WelcomeScreen
     fileWatcher: FileWatcher
@@ -356,16 +355,6 @@ proc selectPreset(app: App, preset: string) =
   if isHttpAgent(app.config.aiAgent):
     app.ensureBuiltinApiKey(proc() = app.restartAiThreadIfRunning())
 
-proc showModelConfigDialog(app: App) =
-  app.modelConfigDialog.centerOnScreen(app.width, app.height)
-  app.modelConfigDialog.setModels(allBuiltinModels(), app.config.aiEnabledModels)
-  app.modelConfigDialog.onResult = proc(confirmed: bool, enabledModels: seq[string]) =
-    if confirmed:
-      app.config.aiEnabledModels = enabledModels
-      app.aiPanel.subtitle = aiSubtitle(app.config)
-      saveAppConfig(app)
-  app.modelConfigDialog.show()
-
 proc showModelActionMenu(app: App, providerId, model: string)
 
 proc showUnifiedModelDialog(app: App) =
@@ -375,31 +364,52 @@ proc showUnifiedModelDialog(app: App) =
   app.modelSelectDialog.lightModel = app.config.aiLightweightModel
   app.modelSelectDialog.heavyProvider = app.config.aiHeavyweightModelProvider
   app.modelSelectDialog.heavyModel = app.config.aiHeavyweightModel
-  app.modelSelectDialog.setModels(allBuiltinModels(), app.config.aiEnabledModels)
+  app.modelSelectDialog.enabledModels = app.config.aiEnabledModels
+  app.modelSelectDialog.setModels(allBuiltinModels())
   app.modelSelectDialog.centerOnScreen(app.width, app.height)
   app.modelSelectDialog.onSelectAuto = proc() =
     app.selectPreset("auto")
   app.modelSelectDialog.onSelectModel = proc(providerId, model: string) =
     app.showModelActionMenu(providerId, model)
-  app.modelSelectDialog.onConfigure = proc() =
-    app.showModelConfigDialog()
+  app.modelSelectDialog.onToggleModel = proc(providerId, model: string, enabled: bool) =
+    let key = providerId & "/" & model
+    let idx = app.config.aiEnabledModels.find(key)
+    if enabled:
+      if idx < 0:
+        app.config.aiEnabledModels.add(key)
+    else:
+      if idx >= 0:
+        app.config.aiEnabledModels.del(idx)
+    app.aiPanel.subtitle = aiSubtitle(app.config)
+    saveAppConfig(app)
+    # Refresh the dialog to show updated disabled state.
+    app.modelSelectDialog.enabledModels = app.config.aiEnabledModels
   app.modelSelectDialog.show()
   discard app.gi.consume()
 
 proc showModelActionMenu(app: App, providerId, model: string) =
-  ## Show the action menu for a selected model: set as light/heavy or set API key.
+  ## Show the action menu for a selected model.
   app.contextMenu.clear()
-  app.contextMenu.addItem("set-light", "Set as Light Model", proc() =
-    app.selectModelForPreset("lightweight", providerId, model)
-    app.selectPreset("lightweight"))
-  app.contextMenu.addItem("set-heavy", "Set as Heavy Model", proc() =
-    app.selectModelForPreset("heavyweight", providerId, model)
-    app.selectPreset("heavyweight"))
-  app.contextMenu.addSeparator()
-  app.contextMenu.addItem("set-apikey", "Set API Key", proc() =
-    app.config.aiBuiltinModelProvider = providerId
-    app.config.aiBuiltinModel = model
-    app.promptApiKey())
+  let key = providerId & "/" & model
+  let isEnabled = app.config.aiEnabledModels.len == 0 or key in app.config.aiEnabledModels
+  if isEnabled:
+    app.contextMenu.addItem("set-light", "Set as Light Model", proc() =
+      app.selectModelForPreset("lightweight", providerId, model)
+      app.selectPreset("lightweight"))
+    app.contextMenu.addItem("set-heavy", "Set as Heavy Model", proc() =
+      app.selectModelForPreset("heavyweight", providerId, model)
+      app.selectPreset("heavyweight"))
+    app.contextMenu.addSeparator()
+    app.contextMenu.addItem("set-apikey", "Set API Key", proc() =
+      app.config.aiBuiltinModelProvider = providerId
+      app.config.aiBuiltinModel = model
+      app.promptApiKey())
+    app.contextMenu.addSeparator()
+    app.contextMenu.addItem("disable", "Disable Model", proc() =
+      app.modelSelectDialog.onToggleModel(providerId, model, false))
+  else:
+    app.contextMenu.addItem("enable", "Enable Model", proc() =
+      app.modelSelectDialog.onToggleModel(providerId, model, true))
   app.contextMenu.showAt(app.width div 2, app.height div 2, app.width, app.height)
   discard app.gi.consume()
 
@@ -1597,7 +1607,6 @@ proc init*(app: App) =
   app.lspMenu = newContextMenu(app.uiFont)
   app.branchMenu = newContextMenu(app.uiFont)
   app.inputDialog = newInputDialog("", "", app.uiFont)
-  app.modelConfigDialog = newModelConfigDialog(app.uiFont)
   app.modelSelectDialog = newModelSelectDialog(app.uiFont)
 
   # Welcome screen
@@ -1914,8 +1923,6 @@ proc run*(app: App) =
     if app.inputDialog.isVisible and app.inputDialog.handleInput(e):
       discard app.gi.consume()
     elif app.modelSelectDialog.isVisible and app.modelSelectDialog.handleInput(e):
-      discard app.gi.consume()
-    elif app.modelConfigDialog.isVisible and app.modelConfigDialog.handleInput(e):
       discard app.gi.consume()
     elif app.dialogManager.isModalActive() and app.dialogManager.handleInput(e):
       discard app.gi.consume()
@@ -2717,7 +2724,6 @@ proc run*(app: App) =
     app.dialogManager.render(app.width, app.height)
     app.inputDialog.render(app.width, app.height)
     app.modelSelectDialog.render(app.width, app.height)
-    app.modelConfigDialog.render(app.width, app.height)
     app.contextMenu.render()
     app.lspMenu.render()
     app.branchMenu.render()
