@@ -139,6 +139,12 @@ proc handleInput*(dialog: ModelSelectDialog, event: Event): bool =
         inc dialog.selectedIndex
       dialog.scrollOffset = max(dialog.scrollOffset, dialog.selectedIndex - dialog.listH div ItemHeight + 1)
       return true
+    of KeySpace:
+      if dialog.selectedIndex >= 0 and dialog.selectedIndex < dialog.items.len:
+        let item = dialog.items[dialog.selectedIndex]
+        if item.kind == msiModel and dialog.onToggleModel != nil:
+          dialog.onToggleModel(item.providerId, item.model, not dialog.isModelEnabled(item.providerId, item.model))
+      return true
     else:
       discard
   of MouseDownEvent:
@@ -249,7 +255,7 @@ proc render*(dialog: ModelSelectDialog, viewportW, viewportH: int) =
     y += ItemHeight
 
   # Hint
-  let hint = "Enter to select, Esc to cancel"
+  let hint = "Enter to select, Space to toggle, Esc to cancel"
   let hintW = dialog.font.measureText(hint).w
   discard dialog.font.drawText(dialog.bounds.x + (dialog.bounds.w - hintW) div 2,
                                dialog.bounds.y + dialog.bounds.h - 14 - fm.lineHeight,
