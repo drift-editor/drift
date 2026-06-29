@@ -13,7 +13,6 @@ const
   ToolbarHeight = 24
   MessagePadding = 8
   MessageGap = 4
-  MaxMessageWidth = 220
   ButtonWidth = 90
   ButtonHeight = 24
   ModelButtonWidth = 112
@@ -434,7 +433,7 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
   false
 
 proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleLayout] =
-  let maxW = min(MaxMessageWidth, bounds.w - 32)
+  let maxW = bounds.w - MessagePadding * 4
   let fm = font.getFontMetrics()
   var y = MessagePadding
   for i, msg in panel.messages:
@@ -465,7 +464,7 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
           totalH += fm.lineHeight
 
     let bubbleH = totalH + MessagePadding * 2
-    let bubbleW = min(bounds.w - 16, maxW + MessagePadding * 2)
+    let bubbleW = bounds.w - MessagePadding * 2
     let bubbleX = if isUser:
       bounds.x + bounds.w - bubbleW - MessagePadding
     else:
