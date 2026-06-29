@@ -17,7 +17,6 @@ const
   ButtonWidth = 90
   ButtonHeight = 24
   ModelButtonWidth = 80
-  PresetButtonWidth = 50
 
 proc runeByteOffsets(s: string): seq[int] =
   ## Return the byte offset of every rune boundary, starting with 0 and ending with s.len.
@@ -73,16 +72,13 @@ type
     onStop*: proc()
     onAgentMenu*: proc(x, y: int)
     onModelMenu*: proc(x, y: int)
-    onPresetMenu*: proc(x, y: int)
     hoverNewChat*: bool
     hoverAgentMenu*: bool
     hoverStop*: bool
-    hoverPresetMenu*: bool
     hoverModelMenu*: bool
     placeholder*: string
     subtitle*: string
     modelPreset*: string
-    modelButtonLabel*: string
     showModelControls*: bool
     userScrolledUp*: bool
     rightClickedMessageIndex*: int
@@ -102,16 +98,13 @@ proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
     onStop: nil,
     onAgentMenu: nil,
     onModelMenu: nil,
-    onPresetMenu: nil,
     hoverNewChat: false,
     hoverAgentMenu: false,
     hoverStop: false,
-    hoverPresetMenu: false,
     hoverModelMenu: false,
     placeholder: placeholder,
     subtitle: "",
     modelPreset: "lightweight",
-    modelButtonLabel: "Model",
     showModelControls: false,
     userScrolledUp: false,
     rightClickedMessageIndex: -1
@@ -379,18 +372,13 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
         panel.onAgentMenu(e.x, e.y)
       return true
 
-    # Model selection dropdown (left) and preset dropdown (right) above input box
+    # Model selection dropdown above input box (unified preset/model picker)
     if panel.showModelControls:
       let toolbarY = inputY + 4
       let modelBtnBounds = rect(bounds.x + MessagePadding, toolbarY, ModelButtonWidth, ToolbarHeight - 2)
       if modelBtnBounds.contains(point(e.x, e.y)):
         if panel.onModelMenu != nil:
           panel.onModelMenu(e.x, e.y)
-        return true
-      let presetBtnBounds = rect(bounds.x + bounds.w - MessagePadding - PresetButtonWidth, toolbarY, PresetButtonWidth, ToolbarHeight - 2)
-      if presetBtnBounds.contains(point(e.x, e.y)):
-        if panel.onPresetMenu != nil:
-          panel.onPresetMenu(e.x, e.y)
         return true
 
     let inputContentTop = if panel.showModelControls: inputY + ToolbarHeight else: inputY
@@ -410,15 +398,12 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
     let iconBtnY = bounds.y + (HeaderHeight - iconBtnSize) div 2
     panel.hoverNewChat = rect(iconBtnX, iconBtnY, iconBtnSize, iconBtnSize).contains(point(e.x, e.y))
     panel.hoverAgentMenu = panel.hoverNewChat
-    panel.hoverPresetMenu = false
     panel.hoverModelMenu = false
     if panel.showModelControls:
       let inputY = bounds.y + bounds.h - InputHeight
       let toolbarY = inputY + 4
       let modelBtnBounds = rect(bounds.x + MessagePadding, toolbarY, ModelButtonWidth, ToolbarHeight - 2)
       panel.hoverModelMenu = modelBtnBounds.contains(point(e.x, e.y))
-      let presetBtnBounds = rect(bounds.x + bounds.w - MessagePadding - PresetButtonWidth, toolbarY, PresetButtonWidth, ToolbarHeight - 2)
-      panel.hoverPresetMenu = presetBtnBounds.contains(point(e.x, e.y))
     if panel.isStreaming:
       let stopX = bounds.x + bounds.w - ButtonWidth * 2 - 16
       panel.hoverStop = rect(stopX, btnY, ButtonWidth, ButtonHeight).contains(point(e.x, e.y))
@@ -620,22 +605,11 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
     fillRect(rect(modelBtnBounds.x, modelBtnBounds.y + modelBtnBounds.h - 1, modelBtnBounds.w, 1), modelBtnBorderC)
     fillRect(rect(modelBtnBounds.x, modelBtnBounds.y, 1, modelBtnBounds.h), modelBtnBorderC)
     fillRect(rect(modelBtnBounds.x + modelBtnBounds.w - 1, modelBtnBounds.y, 1, modelBtnBounds.h), modelBtnBorderC)
-    let modelLabel = panel.modelButtonLabel
-    discard font.drawText(modelBtnBounds.x + 8, modelBtnBounds.y + (modelBtnBounds.h - fm.lineHeight) div 2, modelLabel, textC, color(0, 0, 0, 0))
-
-    let presetBtnBounds = rect(bounds.x + bounds.w - MessagePadding - PresetButtonWidth, toolbarY, PresetButtonWidth, ToolbarHeight - 2)
-    let presetBtnBorderC = if panel.hoverPresetMenu: accentC else: borderC
-    fillRect(presetBtnBounds, bg)
-    fillRect(rect(presetBtnBounds.x, presetBtnBounds.y, presetBtnBounds.w, 1), presetBtnBorderC)
-    fillRect(rect(presetBtnBounds.x, presetBtnBounds.y + presetBtnBounds.h - 1, presetBtnBounds.w, 1), presetBtnBorderC)
-    fillRect(rect(presetBtnBounds.x, presetBtnBounds.y, 1, presetBtnBounds.h), presetBtnBorderC)
-    fillRect(rect(presetBtnBounds.x + presetBtnBounds.w - 1, presetBtnBounds.y, 1, presetBtnBounds.h), presetBtnBorderC)
-    let presetLabel = case panel.modelPreset.toLowerAscii()
+    let modelLabel = case panel.modelPreset.toLowerAscii()
       of "auto": "Auto"
       of "heavyweight": "Heavy"
       else: "Light"
-    let presetW = font.measureText(presetLabel).w
-    discard font.drawText(presetBtnBounds.x + (presetBtnBounds.w - presetW) div 2, presetBtnBounds.y + (presetBtnBounds.h - fm.lineHeight) div 2, presetLabel, textC, color(0, 0, 0, 0))
+    discard font.drawText(modelBtnBounds.x + 8, modelBtnBounds.y + (modelBtnBounds.h - fm.lineHeight) div 2, modelLabel, textC, color(0, 0, 0, 0))
 
   let inputBounds = rect(
     bounds.x + MessagePadding,
