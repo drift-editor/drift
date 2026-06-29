@@ -76,6 +76,7 @@ type
     hoverAgentMenu*: bool
     hoverStop*: bool
     hoverModelMenu*: bool
+    hoverInput*: bool
     placeholder*: string
     subtitle*: string
     modelPreset*: string
@@ -102,6 +103,7 @@ proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
     hoverAgentMenu: false,
     hoverStop: false,
     hoverModelMenu: false,
+    hoverInput: false,
     placeholder: placeholder,
     subtitle: "",
     modelPreset: "lightweight",
@@ -399,11 +401,17 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
     panel.hoverNewChat = rect(iconBtnX, iconBtnY, iconBtnSize, iconBtnSize).contains(point(e.x, e.y))
     panel.hoverAgentMenu = panel.hoverNewChat
     panel.hoverModelMenu = false
+    panel.hoverInput = false
     if panel.showModelControls:
       let inputY = bounds.y + bounds.h - InputHeight
       let toolbarY = inputY + 4
       let modelBtnBounds = rect(bounds.x + MessagePadding, toolbarY, ModelButtonWidth, ToolbarHeight - 2)
       panel.hoverModelMenu = modelBtnBounds.contains(point(e.x, e.y))
+      # Input text area starts below the model toolbar
+      panel.hoverInput = e.y >= inputY + ToolbarHeight
+    else:
+      let inputY = bounds.y + bounds.h - InputHeight
+      panel.hoverInput = e.y >= inputY
     if panel.isStreaming:
       let stopX = bounds.x + bounds.w - ButtonWidth * 2 - 16
       panel.hoverStop = rect(stopX, btnY, ButtonWidth, ButtonHeight).contains(point(e.x, e.y))

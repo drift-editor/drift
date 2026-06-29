@@ -252,8 +252,9 @@ template buildEditorRoot*(app, layout): Node =
       discard app.aiPanel.handleMouse(e, n.bounds)
       true
     aiNode.setCursorResolver(proc(n: Node, x, y: int): CursorKind =
-      if app.aiPanel.hoverNewChat or app.aiPanel.hoverStop: curHand
-      else: curIbeam)
+      if app.aiPanel.hoverNewChat or app.aiPanel.hoverStop or app.aiPanel.hoverModelMenu: curHand
+      elif app.aiPanel.hoverInput: curIbeam
+      else: curDefault)
     root.addChild(aiNode)
 
   # Terminal node
