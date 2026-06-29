@@ -105,6 +105,9 @@ proc listBranches*(path: string): seq[string] =
 proc stageFile*(path, filePath: string): bool =
   execGitCommand(["add", filePath], path).exitCode == 0
 
+proc stageAllChanges*(path: string): bool =
+  execGitCommand(["add", "-A"], path).exitCode == 0
+
 proc unstageFile*(path, filePath: string): bool =
   execGitCommand(["reset", "HEAD", filePath], path).exitCode == 0
 

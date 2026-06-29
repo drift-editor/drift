@@ -448,11 +448,29 @@ proc runBuiltinAI(t: AIThread) {.thread.} =
       return
     case req.kind
     of amkSendMessage:
-      let answer = doChatCompletion(t.config, req.text)
+      var promptText = req.text
+      # Use the lightweight model to detect git-related intent, then attach
+      # local status + diff so the main model can answer without tool access.
+      if classifyGitIntent(t.config, req.text):
+        let gitContext = buildGitContextPrompt(t.workspaceRoot, req.text)
+        if gitContext.len > 0:
+          promptText = gitContext
+      let answer = doChatCompletion(t.config, promptText)
       if answer.startsWith("HTTP error") or answer.startsWith("Request failed") or answer.startsWith("Unexpected response"):
         t.sendResponse(AIMessage(kind: amkError, error: answer))
       else:
-        t.sendResponse(AIMessage(kind: amkResponseChunk, text: answer))
+        # Agent-like execution: if the user asked to commit local changes and we
+        # attached git context, treat the model output as the commit message,
+        # stage all changes, commit, and report the result.
+        var finalText = answer
+        if promptText != req.text and classifyGitIntent(t.config, req.text):
+          let message = answer.strip()
+          if message.len > 0:
+            if gitcmd.stageAllChanges(t.workspaceRoot) and gitcmd.commitChanges(t.workspaceRoot, message):
+              finalText = "Committed with message:\n\n" & message
+            else:
+              finalText = "Generated commit message:\n\n" & message & "\n\n(commit failed)"
+        t.sendResponse(AIMessage(kind: amkResponseChunk, text: finalText))
         t.sendResponse(AIMessage(kind: amkResponseDone))
     of amkNewSession, amkClearSession:
       discard
