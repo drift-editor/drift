@@ -133,6 +133,43 @@ nim c -d:release -o:drift src/drift.nim
 | `F9` | Toggle breakpoint |
 | `Esc` | Close panel / overlay |
 
+## AI Assistant
+
+Drift includes an AI chat panel with two kinds of providers:
+
+- **ACP agents** — external CLI tools that speak the Agent Communication Protocol over stdio. Supported agents include Kimi, Claude Code, OpenCode, Gemini, Codex, Cursor, plus a custom command option.
+- **Built-in agent** — Drift's own OpenAI-compatible HTTP client. It talks directly to providers such as OpenAI, DeepSeek, Moonshot, Groq, and OpenRouter.
+
+### Model selection
+
+When the built-in agent is active, the toolbar above the AI input shows the current preset:
+
+- **Auto** — route each prompt to the lightweight or heavyweight model based on prompt complexity.
+- **Light** — always use the lightweight model.
+- **Heavy** — always use the heavyweight model.
+
+Click the preset button to open the model picker. The first item is `Auto`; models assigned to Light/Heavy display a badge. Selecting a model offers **Set as Light Model**, **Set as Heavy Model**, or **Set API Key**.
+
+### Configuration
+
+API keys and the base URL are stored in `~/.config/drift/config.json`:
+
+```json
+{
+  "aiAgent": "builtin",
+  "aiApiKey": "your-api-key",
+  "aiBaseUrl": "https://api.example.com/v1",
+  "aiBuiltinModelProvider": "deepseek",
+  "aiBuiltinModel": "deepseek-v4-flash",
+  "aiLightweightModelProvider": "deepseek",
+  "aiLightweightModel": "deepseek-v4-flash",
+  "aiHeavyweightModelProvider": "deepseek",
+  "aiHeavyweightModel": "deepseek-v4-pro"
+}
+```
+
+The base URL is only filled automatically when it is empty; changing the provider does not overwrite a custom URL.
+
 ## License
 
 Dual-licensed under **AGPL-3.0** and **Commercial License**.
