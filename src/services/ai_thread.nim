@@ -461,6 +461,148 @@ proc shutdownAIProcess(p: Process, readerChan: var SPSChannel[string],
   readerChan.close()
   joinThread(readerThread)
 
+# ---------------------------------------------------------------------------
+#  Direct file-operation execution (built-in HTTP agent)
+# ---------------------------------------------------------------------------
+# The built-in HTTP agent has no tool-use / function-calling capability, so it
+# cannot mutate the filesystem through the LLM. Instead we detect clear
+# imperative file-operation commands with deterministic pattern matching and
+# execute them directly — the same "agentic" pattern used for git auto-commit.
+# This is intentionally NOT an LLM classifier: destructive operations must be
+# triggered deterministically to avoid false-positive data loss.
+
+type
+  FileOpKind* = enum
+    fokNone
+    fokDelete
+    fokCreate
+    fokMove
+
+  FileOpIntent* = object
+    kind*: FileOpKind
+    path*: string       # target path (delete / create / move source)
+    destPath*: string   # destination (move only)
+
+proc stripArticleAndSuffix(s: string): string =
+  ## Remove common leading articles ("the", "a", "an") and trailing qualifiers
+  ## ("directory", "folder", "file") so "remove the docs folder" -> "docs".
+  result = s.strip()
+  for art in ["the ", "a ", "an "]:
+    if result.toLowerAscii().startsWith(art):
+      result = result[art.len..^1].strip()
+      break
+  for qual in [" directory", " folder", " file", " dir"]:
+    if result.toLowerAscii().endsWith(qual):
+      result = result[0..<(result.len - qual.len)].strip()
+      break
+
+proc unquote(s: string): string =
+  ## Strip surrounding double or single quotes.
+  result = s.strip()
+  if result.len >= 2:
+    if (result[0] == '"' and result[^1] == '"') or
+       (result[0] == '\'' and result[^1] == '\''):
+      result = result[1..^2]
+
+proc detectFileOp*(prompt: string): FileOpIntent =
+  ## Detect a clear imperative file-operation command via pattern matching.
+  ## Returns fokNone if the prompt is not a direct file command.
+  result = FileOpIntent(kind: fokNone)
+  let p = prompt.strip()
+  if p.len == 0: return
+  let lower = p.toLowerAscii()
+
+  # --- Delete / remove ---
+  for verb in ["remove ", "delete ", "rm ", "del "]:
+    if lower.startsWith(verb):
+      let rest = stripArticleAndSuffix(p[verb.len..^1])
+      let wasQuoted = rest.strip().len >= 2 and
+        ((rest.strip()[0] == '"' and rest.strip()[^1] == '"') or
+         (rest.strip()[0] == '\'' and rest.strip()[^1] == '\''))
+      let pathStr = unquote(rest)
+      if pathStr.len > 0 and (wasQuoted or not pathStr.contains(" ")):
+        return FileOpIntent(kind: fokDelete, path: pathStr)
+      elif pathStr.len > 0 and (pathStr.contains('/') or pathStr.contains('\\')):
+        return FileOpIntent(kind: fokDelete, path: pathStr)
+      return FileOpIntent(kind: fokNone)
+
+  # --- Create file ---
+  for verb in ["create file ", "make file ", "new file ", "touch "]:
+    if lower.startsWith(verb):
+      let pathStr = unquote(stripArticleAndSuffix(p[verb.len..^1]))
+      if pathStr.len > 0:
+        return FileOpIntent(kind: fokCreate, path: pathStr)
+      return FileOpIntent(kind: fokNone)
+
+  # --- Move / rename ---
+  for verb in ["move ", "rename ", "mv "]:
+    if lower.startsWith(verb):
+      let rest = p[verb.len..^1]
+      let toIdx = rest.toLowerAscii().find(" to ")
+      if toIdx > 0:
+        let src = unquote(stripArticleAndSuffix(rest[0..<toIdx]))
+        let dst = unquote(stripArticleAndSuffix(rest[toIdx+4..^1]))
+        if src.len > 0 and dst.len > 0:
+          return FileOpIntent(kind: fokMove, path: src, destPath: dst)
+      return FileOpIntent(kind: fokNone)
+
+proc executeFileOp*(t: AIThread, intent: FileOpIntent): tuple[ok: bool, msg: string, paths: seq[string]] =
+  ## Execute a file operation with workspace containment validation.
+  result = (false, "", @[])
+  if intent.kind == fokNone: return
+  let absPath = if intent.path.isAbsolute: intent.path else: t.workspaceRoot / intent.path
+  case intent.kind
+  of fokDelete:
+    if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+      return (false, "Refused: '" & intent.path & "' is outside the workspace.", @[])
+    if sameFile(absPath, t.workspaceRoot) or absPath == t.workspaceRoot:
+      return (false, "Refused: cannot delete the workspace root.", @[])
+    if dirExists(absPath):
+      try:
+        removeDir(absPath)
+        return (true, "Deleted directory: " & intent.path, @[absPath])
+      except CatchableError as e:
+        return (false, "Failed to delete directory: " & e.msg, @[])
+    elif fileExists(absPath):
+      try:
+        removeFile(absPath)
+        return (true, "Deleted file: " & intent.path, @[absPath])
+      except CatchableError as e:
+        return (false, "Failed to delete file: " & e.msg, @[])
+    else:
+      return (false, "Path not found: " & intent.path, @[])
+  of fokCreate:
+    if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+      return (false, "Refused: '" & intent.path & "' is outside the workspace.", @[])
+    if fileExists(absPath) or dirExists(absPath):
+      return (false, "Already exists: " & intent.path, @[])
+    try:
+      let parent = absPath.parentDir()
+      if parent.len > 0 and not dirExists(parent): createDir(parent)
+      writeFile(absPath, "")
+      return (true, "Created file: " & intent.path, @[absPath])
+    except CatchableError as e:
+      return (false, "Failed to create file: " & e.msg, @[])
+  of fokMove:
+    let absDst = if intent.destPath.isAbsolute: intent.destPath else: t.workspaceRoot / intent.destPath
+    if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+      return (false, "Refused: source '" & intent.path & "' is outside the workspace.", @[])
+    if not isPathInsideWorkspace(absDst, t.workspaceRoot):
+      return (false, "Refused: destination '" & intent.destPath & "' is outside the workspace.", @[])
+    if not fileExists(absPath) and not dirExists(absPath):
+      return (false, "Source not found: " & intent.path, @[])
+    if fileExists(absDst) or dirExists(absDst):
+      return (false, "Destination already exists: " & intent.destPath, @[])
+    try:
+      let parent = absDst.parentDir()
+      if parent.len > 0 and not dirExists(parent): createDir(parent)
+      moveFile(absPath, absDst)
+      return (true, "Moved " & intent.path & " to " & intent.destPath, @[absPath, absDst])
+    except CatchableError as e:
+      return (false, "Failed to move: " & e.msg, @[])
+  of fokNone:
+    discard
+
 proc runBuiltinAI(t: AIThread) {.thread.} =
   ## Worker path for the built-in HTTP agent.
   t.isReady.store(true, moRelease)
@@ -475,38 +617,55 @@ proc runBuiltinAI(t: AIThread) {.thread.} =
       return
     case req.kind
     of amkSendMessage:
-      var promptText = req.text
-      # Use the lightweight model to detect git-related intent ONCE, then attach
-      # local status + diff so the main model can answer without tool access.
-      let isGitIntent = classifyGitIntent(t.config, req.text)
-      if isGitIntent:
-        let gitContext = buildGitContextPrompt(t.workspaceRoot, req.text)
-        if gitContext.len > 0:
-          promptText = gitContext
-      # Send the prompt with multi-turn conversation history for context memory.
-      let answer = doChatCompletionHistory(t.config, promptText, t.history)
-      if answer.startsWith("HTTP error") or answer.startsWith("Request failed") or answer.startsWith("Unexpected response"):
-        t.sendResponse(AIMessage(kind: amkError, error: answer))
-      else:
-        # Record this turn into history (user prompt + assistant reply).
+      # --- Direct file-operation execution (no LLM needed) ---
+      # Check for clear imperative file commands (delete/create/move) first.
+      # These are executed directly and skip the LLM call entirely.
+      let fileOp = detectFileOp(req.text)
+      if fileOp.kind != fokNone:
+        let (_, msg, paths) = executeFileOp(t, fileOp)
+        # Notify the UI of changed paths so file explorer & buffers refresh.
+        for p in paths:
+          t.sendResponse(AIMessage(kind: amkFileChanged, text: p))
+        t.sendResponse(AIMessage(kind: amkResponseChunk, text: msg))
+        t.sendResponse(AIMessage(kind: amkResponseDone))
+        # Record into conversation history for multi-turn memory.
         t.history.add((role: ChatRoleUser, content: req.text))
-        t.history.add((role: ChatRoleAssistant, content: answer))
-        # Prune oldest turns to bound memory growth.
+        t.history.add((role: ChatRoleAssistant, content: msg))
         while t.history.len > MaxHistoryTurns * 2:
           t.history.delete(0)
-        # Agent-like execution: if the user asked to commit local changes and we
-        # attached git context, treat the model output as the commit message,
-        # stage all changes, commit, and report the result.
-        var finalText = answer
-        if promptText != req.text and isGitIntent:
-          let message = answer.strip()
-          if message.len > 0:
-            if gitcmd.stageAllChanges(t.workspaceRoot) and gitcmd.commitChanges(t.workspaceRoot, message):
-              finalText = "Committed with message:\n\n" & message
-            else:
-              finalText = "Generated commit message:\n\n" & message & "\n\n(commit failed)"
-        t.sendResponse(AIMessage(kind: amkResponseChunk, text: finalText))
-        t.sendResponse(AIMessage(kind: amkResponseDone))
+      else:
+        var promptText = req.text
+        # Use the lightweight model to detect git-related intent ONCE, then attach
+        # local status + diff so the main model can answer without tool access.
+        let isGitIntent = classifyGitIntent(t.config, req.text)
+        if isGitIntent:
+          let gitContext = buildGitContextPrompt(t.workspaceRoot, req.text)
+          if gitContext.len > 0:
+            promptText = gitContext
+        # Send the prompt with multi-turn conversation history for context memory.
+        let answer = doChatCompletionHistory(t.config, promptText, t.history)
+        if answer.startsWith("HTTP error") or answer.startsWith("Request failed") or answer.startsWith("Unexpected response"):
+          t.sendResponse(AIMessage(kind: amkError, error: answer))
+        else:
+          # Record this turn into history (user prompt + assistant reply).
+          t.history.add((role: ChatRoleUser, content: req.text))
+          t.history.add((role: ChatRoleAssistant, content: answer))
+          # Prune oldest turns to bound memory growth.
+          while t.history.len > MaxHistoryTurns * 2:
+            t.history.delete(0)
+          # Agent-like execution: if the user asked to commit local changes and we
+          # attached git context, treat the model output as the commit message,
+          # stage all changes, commit, and report the result.
+          var finalText = answer
+          if promptText != req.text and isGitIntent:
+            let message = answer.strip()
+            if message.len > 0:
+              if gitcmd.stageAllChanges(t.workspaceRoot) and gitcmd.commitChanges(t.workspaceRoot, message):
+                finalText = "Committed with message:\n\n" & message
+              else:
+                finalText = "Generated commit message:\n\n" & message & "\n\n(commit failed)"
+          t.sendResponse(AIMessage(kind: amkResponseChunk, text: finalText))
+          t.sendResponse(AIMessage(kind: amkResponseDone))
     of amkNewSession, amkClearSession:
       # Start a fresh conversation: clear multi-turn history.
       t.history.setLen(0)
