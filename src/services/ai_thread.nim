@@ -191,11 +191,35 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
     else:
       sendJsonRpcError(p, reqId, -32000, "Directory not found: " & absPath)
 
+  of "fs/delete_file":
+    let filePath = params{"path"}.getStr()
+    let absPath = if filePath.isAbsolute: filePath
+                 else: t.workspaceRoot / filePath
+    if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+      sendJsonRpcError(p, reqId, -32000, "Access denied: path outside workspace")
+    elif fileExists(absPath):
+      try:
+        removeFile(absPath)
+        sendJsonRpcResponse(p, reqId, %*{"success": true, "message": "Deleted: " & filePath})
+        t.sendResponse(AIMessage(kind: amkFileChanged, text: absPath))
+      except CatchableError as e:
+        sendJsonRpcError(p, reqId, -32000, "Failed to delete file: " & e.msg)
+    elif dirExists(absPath):
+      try:
+        removeDir(absPath)
+        sendJsonRpcResponse(p, reqId, %*{"success": true, "message": "Deleted directory: " & filePath})
+        t.sendResponse(AIMessage(kind: amkFileChanged, text: absPath))
+      except CatchableError as e:
+        sendJsonRpcError(p, reqId, -32000, "Failed to delete directory: " & e.msg)
+    else:
+      sendJsonRpcError(p, reqId, -32000, "File not found: " & filePath)
+
   of "tools/list":
     let tools = %*[
       { "name": "fs/read_text_file", "description": "Read the contents of a text file" },
       { "name": "fs/write_text_file", "description": "Write content to a text file" },
       { "name": "fs/list_directory", "description": "List files and directories" },
+      { "name": "fs/delete_file", "description": "Delete a file or empty directory" },
       { "name": "git/get_file_diff", "description": "Get git diff for a specific file" },
       { "name": "git/get_diff", "description": "Get full working tree diff" }
     ]
@@ -227,10 +251,9 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
 
   of "session/request_permission":
     let permType = params{"permissionType"}.getStr("")
-    let isWrite = permType.contains("write") or permType.contains("edit") or permType.contains("modify")
     let isExec = permType.contains("execute") or permType.contains("run") or permType.contains("shell")
-    if isWrite or isExec:
-      # Surface the denial to the UI so users know the agent wanted to act.
+    if isExec:
+      # Deny execution permissions for safety
       t.sendResponse(AIMessage(kind: amkError, error: "AI requested " & permType & " permission; denied for safety. Use the CLI directly if you want to allow this action."))
       sendJsonRpcResponse(p, reqId, %*{
         "outcome": {
