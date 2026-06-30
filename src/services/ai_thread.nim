@@ -137,6 +137,14 @@ proc isPathInsideWorkspace*(path, root: string): bool =
     return false
   return absPath.startsWith(normRoot)
 
+proc resolveWorkspacePath*(path, root: string): string =
+  ## Resolve a relative path against the workspace root (not CWD).
+  ## Absolute paths are canonicalized directly.
+  if path.isAbsolute: canonicalPathForCheck(path)
+  else: canonicalPathForCheck(root / path)
+
+const MaxFileWriteSize* = 10_000_000  ## 10 MB per-file write cap for ACP agents.
+
 proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
   let reqId = j["id"].getInt()
   let rpcMethod = j["method"].getStr()
@@ -145,7 +153,7 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
   case rpcMethod
   of "fs/read_text_file":
     let path = params{"path"}.getStr()
-    let absPath = absolutePath(path)
+    let absPath = resolveWorkspacePath(path, t.workspaceRoot)
     if not isPathInsideWorkspace(absPath, t.workspaceRoot):
       sendJsonRpcError(p, reqId, -32000, "Access denied: path outside workspace")
     elif fileExists(absPath):
@@ -160,7 +168,10 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
   of "fs/write_text_file":
     let path = params{"path"}.getStr()
     let content = params{"content"}.getStr()
-    let absPath = absolutePath(path)
+    if content.len > MaxFileWriteSize:
+      sendJsonRpcError(p, reqId, -32000, "Content too large (max " & $MaxFileWriteSize & " bytes)")
+      return
+    let absPath = resolveWorkspacePath(path, t.workspaceRoot)
     if not isPathInsideWorkspace(absPath, t.workspaceRoot):
       sendJsonRpcError(p, reqId, -32000, "Access denied: path outside workspace")
     else:
@@ -173,7 +184,7 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
 
   of "fs/list_directory":
     let path = params{"path"}.getStr()
-    let absPath = absolutePath(path)
+    let absPath = resolveWorkspacePath(path, t.workspaceRoot)
     if not isPathInsideWorkspace(absPath, t.workspaceRoot):
       sendJsonRpcError(p, reqId, -32000, "Access denied: path outside workspace")
     elif dirExists(absPath):
@@ -191,19 +202,48 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
     else:
       sendJsonRpcError(p, reqId, -32000, "Directory not found: " & absPath)
 
-  of "fs/delete_file":
+  of "fs/delete":
     let filePath = params{"path"}.getStr()
-    let absPath = if filePath.isAbsolute: filePath
-                 else: t.workspaceRoot / filePath
+    let absPath = resolveWorkspacePath(filePath, t.workspaceRoot)
     if not isPathInsideWorkspace(absPath, t.workspaceRoot):
       sendJsonRpcError(p, reqId, -32000, "Access denied: path outside workspace")
+    elif sameFile(absPath, t.workspaceRoot) or absPath == t.workspaceRoot:
+      sendJsonRpcError(p, reqId, -32000, "Refused: cannot delete workspace root")
+    elif dirExists(absPath):
+      var nonEmpty = false
+      try:
+        for _, _ in walkDir(absPath):
+          nonEmpty = true
+          break
+        if nonEmpty:
+          sendJsonRpcError(p, reqId, -32000, "Directory not empty; delete contents first or use fs/delete_dir")
+          return
+      except CatchableError:
+        sendJsonRpcError(p, reqId, -32000, "Failed to read directory: " & absPath)
+        return
+      try:
+        removeDir(absPath)
+        sendJsonRpcResponse(p, reqId, %*{"success": true, "message": "Deleted directory: " & filePath})
+        t.sendResponse(AIMessage(kind: amkFileChanged, text: absPath))
+      except CatchableError as e:
+        sendJsonRpcError(p, reqId, -32000, "Failed to delete directory: " & e.msg)
     elif fileExists(absPath):
       try:
         removeFile(absPath)
-        sendJsonRpcResponse(p, reqId, %*{"success": true, "message": "Deleted: " & filePath})
+        sendJsonRpcResponse(p, reqId, %*{"success": true, "message": "Deleted file: " & filePath})
         t.sendResponse(AIMessage(kind: amkFileChanged, text: absPath))
       except CatchableError as e:
         sendJsonRpcError(p, reqId, -32000, "Failed to delete file: " & e.msg)
+    else:
+      sendJsonRpcError(p, reqId, -32000, "Path not found: " & filePath)
+
+  of "fs/delete_dir":
+    let filePath = params{"path"}.getStr()
+    let absPath = resolveWorkspacePath(filePath, t.workspaceRoot)
+    if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+      sendJsonRpcError(p, reqId, -32000, "Access denied: path outside workspace")
+    elif sameFile(absPath, t.workspaceRoot) or absPath == t.workspaceRoot:
+      sendJsonRpcError(p, reqId, -32000, "Refused: cannot delete workspace root")
     elif dirExists(absPath):
       try:
         removeDir(absPath)
@@ -212,16 +252,81 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
       except CatchableError as e:
         sendJsonRpcError(p, reqId, -32000, "Failed to delete directory: " & e.msg)
     else:
-      sendJsonRpcError(p, reqId, -32000, "File not found: " & filePath)
+      sendJsonRpcError(p, reqId, -32000, "Directory not found: " & filePath)
 
   of "tools/list":
     let tools = %*[
-      { "name": "fs/read_text_file", "description": "Read the contents of a text file" },
-      { "name": "fs/write_text_file", "description": "Write content to a text file" },
-      { "name": "fs/list_directory", "description": "List files and directories" },
-      { "name": "fs/delete_file", "description": "Delete a file or empty directory" },
-      { "name": "git/get_file_diff", "description": "Get git diff for a specific file" },
-      { "name": "git/get_diff", "description": "Get full working tree diff" }
+      { "name": "fs/read_text_file",
+        "description": "Read the contents of a text file",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "Path to the file (relative to workspace or absolute)" }
+          },
+          "required": ["path"]
+        }
+      },
+      { "name": "fs/write_text_file",
+        "description": "Write content to a text file (max 10 MB)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "Path to the file (relative to workspace or absolute)" },
+            "content": { "type": "string", "description": "Content to write" }
+          },
+          "required": ["path", "content"]
+        }
+      },
+      { "name": "fs/list_directory",
+        "description": "List files and directories in a path",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "Path to the directory (relative to workspace or absolute)" }
+          },
+          "required": ["path"]
+        }
+      },
+      { "name": "fs/delete",
+        "description": "Delete a file or empty directory",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "Path to delete (relative to workspace or absolute)" }
+          },
+          "required": ["path"]
+        }
+      },
+      { "name": "fs/delete_dir",
+        "description": "Delete a directory and all its contents (recursive)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "Path to the directory (relative to workspace or absolute)" }
+          },
+          "required": ["path"]
+        }
+      },
+      { "name": "git/get_file_diff",
+        "description": "Get git diff for a specific file (staged and unstaged)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "Path to the file (repo root is auto-detected)" }
+          },
+          "required": ["path"]
+        }
+      },
+      { "name": "git/get_diff",
+        "description": "Get full working tree diff (HEAD vs working tree)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "Path to a file or directory in the repo (repo root is auto-detected)" }
+          },
+          "required": ["path"]
+        }
+      }
     ]
     sendJsonRpcResponse(p, reqId, %*{"tools": tools})
 
@@ -242,12 +347,13 @@ proc handleAgentRequest(t: AIThread, p: Process, j: JsonNode) =
       sendJsonRpcResponse(p, reqId, result)
 
   of "git/get_diff":
-    let repoRoot = params{"repoRoot"}.getStr()
-    if repoRoot.len == 0 or not gitcmd.isGitRepository(repoRoot):
-      sendJsonRpcError(p, reqId, -32000, "Not a git repository: " & repoRoot)
+    let filePath = params{"path"}.getStr()
+    let repoRoot = gitcmd.getRepoRoot(filePath)
+    if repoRoot.len == 0:
+      sendJsonRpcError(p, reqId, -32000, "Not a git repository: " & filePath)
     else:
       let diff = gitcmd.getAllLocalDiff(repoRoot)
-      sendJsonRpcResponse(p, reqId, %*{"diff": diff})
+      sendJsonRpcResponse(p, reqId, %*{"diff": diff, "repoRoot": repoRoot})
 
   of "session/request_permission":
     let permType = params{"permissionType"}.getStr("")
@@ -483,15 +589,20 @@ type
     path*: string       # target path (delete / create / move source)
     destPath*: string   # destination (move only)
 
-proc stripArticleAndSuffix(s: string): string =
-  ## Remove common leading articles ("the", "a", "an") and trailing qualifiers
-  ## ("directory", "folder", "file") so "remove the docs folder" -> "docs".
+proc stripLeadingArticleAndQualifiers(s: string): string =
+  ## Strip leading articles ("the", "a", "an") always.
+  ## Strip trailing type qualifiers ("directory", "folder", "file", "dir")
+  ## only when the remaining text contains a path separator — "remove the
+  ## docs/superpowers directory" → "docs/superpowers" but "remove the config
+  ## file" is left alone to fail isPathLike, avoiding false positives.
   result = s.strip()
   for art in ["the ", "a ", "an "]:
     if result.toLowerAscii().startsWith(art):
       result = result[art.len..^1].strip()
       break
   for qual in [" directory", " folder", " file", " dir"]:
+    let hasSep = result.contains('/') or result.contains('\\')
+    if not hasSep: break
     if result.toLowerAscii().endsWith(qual):
       result = result[0..<(result.len - qual.len)].strip()
       break
@@ -504,6 +615,23 @@ proc unquote(s: string): string =
        (result[0] == '\'' and result[^1] == '\''):
       result = result[1..^2]
 
+proc isPathLike(s: string): bool =
+  ## Heuristic: the string looks like a file/directory path rather than
+  ## conversational text. Requires at least one of: path separator, file
+  ## extension, quoted text was handled before this check.
+  ## Multi-word results without path separators are rejected as ambiguous.
+  if s.len == 0: return false
+  if s.contains('/') or s.contains('\\'): return true
+  let lower = s.toLowerAscii()
+  if lower.contains(' ') or lower.contains('\t'): return false
+  if s.contains('.'): return true
+  for common in ["it", "me", "us", "all", "that", "this", "them", "what",
+                  "which", "where", "when", "how", "why", "who", "any",
+                  "some", "more", "less", "only", "just", "now", "then",
+                  "here", "there", "back", "out", "in", "on", "at", "up"]:
+    if lower == common: return false
+  return true
+
 proc detectFileOp*(prompt: string): FileOpIntent =
   ## Detect a clear imperative file-operation command via pattern matching.
   ## Returns fokNone if the prompt is not a direct file command.
@@ -515,22 +643,20 @@ proc detectFileOp*(prompt: string): FileOpIntent =
   # --- Delete / remove ---
   for verb in ["remove ", "delete ", "rm ", "del "]:
     if lower.startsWith(verb):
-      let rest = stripArticleAndSuffix(p[verb.len..^1])
+      let rest = stripLeadingArticleAndQualifiers(p[verb.len..^1])
       let wasQuoted = rest.strip().len >= 2 and
         ((rest.strip()[0] == '"' and rest.strip()[^1] == '"') or
          (rest.strip()[0] == '\'' and rest.strip()[^1] == '\''))
       let pathStr = unquote(rest)
-      if pathStr.len > 0 and (wasQuoted or not pathStr.contains(" ")):
-        return FileOpIntent(kind: fokDelete, path: pathStr)
-      elif pathStr.len > 0 and (pathStr.contains('/') or pathStr.contains('\\')):
+      if pathStr.len > 0 and (wasQuoted or isPathLike(pathStr)):
         return FileOpIntent(kind: fokDelete, path: pathStr)
       return FileOpIntent(kind: fokNone)
 
   # --- Create file ---
   for verb in ["create file ", "make file ", "new file ", "touch "]:
     if lower.startsWith(verb):
-      let pathStr = unquote(stripArticleAndSuffix(p[verb.len..^1]))
-      if pathStr.len > 0:
+      let pathStr = unquote(stripLeadingArticleAndQualifiers(p[verb.len..^1]))
+      if pathStr.len > 0 and isPathLike(pathStr):
         return FileOpIntent(kind: fokCreate, path: pathStr)
       return FileOpIntent(kind: fokNone)
 
@@ -540,9 +666,9 @@ proc detectFileOp*(prompt: string): FileOpIntent =
       let rest = p[verb.len..^1]
       let toIdx = rest.toLowerAscii().find(" to ")
       if toIdx > 0:
-        let src = unquote(stripArticleAndSuffix(rest[0..<toIdx]))
-        let dst = unquote(stripArticleAndSuffix(rest[toIdx+4..^1]))
-        if src.len > 0 and dst.len > 0:
+        let src = unquote(stripLeadingArticleAndQualifiers(rest[0..<toIdx]))
+        let dst = unquote(stripLeadingArticleAndQualifiers(rest[toIdx+4..^1]))
+        if src.len > 0 and dst.len > 0 and isPathLike(src) and isPathLike(dst):
           return FileOpIntent(kind: fokMove, path: src, destPath: dst)
       return FileOpIntent(kind: fokNone)
 
@@ -598,8 +724,13 @@ proc executeFileOp*(t: AIThread, intent: FileOpIntent): tuple[ok: bool, msg: str
       if parent.len > 0 and not dirExists(parent): createDir(parent)
       moveFile(absPath, absDst)
       return (true, "Moved " & intent.path & " to " & intent.destPath, @[absPath, absDst])
-    except CatchableError as e:
-      return (false, "Failed to move: " & e.msg, @[])
+    except CatchableError:
+      try:
+        copyFile(absPath, absDst)
+        removeFile(absPath)
+        return (true, "Moved (copy) " & intent.path & " to " & intent.destPath, @[absPath, absDst])
+      except CatchableError as e:
+        return (false, "Failed to move: " & e.msg, @[])
   of fokNone:
     discard
 

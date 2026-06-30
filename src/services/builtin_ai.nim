@@ -9,6 +9,8 @@ import prompt_complexity
 
 const
   HttpTimeoutMs* = 60_000   ## Per-request timeout for built-in HTTP calls.
+  HttpMaxRetries = 3        ## Max retry count for transient HTTP failures.
+  HttpRetryBaseMs = 500     ## Base backoff (ms) before first retry.
   ChatRoleUser* = "user"
   ChatRoleAssistant* = "assistant"
 
@@ -78,6 +80,46 @@ proc allBuiltinModels*(): seq[tuple[providerId, model, label: string]] =
     for m in mp.models:
       result.add((mp.id, m, mp.label & " — " & m))
 
+proc newChatClient(config: AppConfig): HttpClient =
+  ## Create a shared HTTP client with auth headers for chat completions.
+  result = newHttpClient(userAgent = "drift/1.0", timeout = HttpTimeoutMs)
+  result.headers = newHttpHeaders({
+    "Content-Type": "application/json"
+  })
+  if config.aiApiKey.len > 0:
+    result.headers["Authorization"] = "Bearer " & config.aiApiKey
+
+proc parseChatResult(resp: Response): string =
+  ## Parse an OpenAI-compatible chat completion response body.
+  ## Returns the assistant message content, or an empty string on failure.
+  let j = parseJson(resp.body)
+  if j.hasKey("choices") and j["choices"].kind == JArray and j["choices"].len > 0:
+    let choice = j["choices"][0]
+    if choice.hasKey("message") and choice["message"].hasKey("content"):
+      return choice["message"]["content"].getStr()
+  return ""
+
+proc isTransientHttpError(code: int): bool =
+  ## True for status codes worth retrying (429 rate-limit, 5xx server errors).
+  code == 429 or (code >= 500 and code <= 599)
+
+proc retryableRequest(client: HttpClient, url, body: string): Response =
+  ## HTTP POST with exponential backoff retry on transient failures.
+  var delay = HttpRetryBaseMs
+  for attempt in 1..HttpMaxRetries:
+    try:
+      result = client.request(url, httpMethod = HttpPost, body = body)
+      if not isTransientHttpError(result.code.int):
+        return
+    except CatchableError:
+      discard
+    sleep(delay)
+    delay *= 2
+  try:
+    result = client.request(url, httpMethod = HttpPost, body = body)
+  except CatchableError as e:
+    raise e
+
 proc makeChatRequest*(config: AppConfig, prompt: string): string =
   ## Build OpenAI-compatible /chat/completions request body (single-turn, kept
   ## for backward compatibility/tests).
@@ -117,26 +159,19 @@ proc doChatCompletionWithModel*(config: AppConfig, prompt, providerId, model: st
   if baseUrl.len == 0:
     baseUrl = "https://api.openai.com/v1"
   let url = baseUrl & "/chat/completions"
-  let client = newHttpClient(userAgent = "drift/1.0", timeout = HttpTimeoutMs)
-  client.headers = newHttpHeaders({
-    "Content-Type": "application/json"
-  })
-  if config.aiApiKey.len > 0:
-    client.headers["Authorization"] = "Bearer " & config.aiApiKey
+  let client = newChatClient(config)
   let body = %*{
     "model": model,
     "messages": [{"role": "user", "content": prompt}],
     "stream": false
   }
   try:
-    let resp = client.request(url, httpMethod = HttpPost, body = $body)
+    let resp = retryableRequest(client, url, $body)
     if resp.code.int div 100 != 2:
       return "HTTP error " & $resp.code & ": " & resp.body
-    let j = parseJson(resp.body)
-    if j.hasKey("choices") and j["choices"].kind == JArray and j["choices"].len > 0:
-      let choice = j["choices"][0]
-      if choice.hasKey("message") and choice["message"].hasKey("content"):
-        return choice["message"]["content"].getStr()
+    let parsed = parseChatResult(resp)
+    if parsed.len > 0:
+      return parsed
     return "Unexpected response: " & resp.body
   except CatchableError as e:
     return "Request failed: " & e.msg
@@ -146,6 +181,17 @@ proc doChatCompletionWithModel*(config: AppConfig, prompt, providerId, model: st
 proc classifyGitIntent*(config: AppConfig, userText: string): bool =
   ## Ask the lightweight model whether the user is requesting git-related help.
   ## Falls back to false on any error so we don't block the main prompt.
+  ## Uses a keyword pre-filter to skip the LLM call for clearly non-git prompts.
+  let lower = userText.toLowerAscii()
+  var hasGitKeyword = false
+  for kw in ["commit", "diff", "stage", "unstaged", "stash", "git status",
+              "git log", "git branch", "merge", "rebase", "checkout",
+              "git add", "git rm", "working tree", "repo", "repository"]:
+    if lower.contains(kw):
+      hasGitKeyword = true
+      break
+  if not hasGitKeyword:
+    return false
   let classifierPrompt = """You are a classifier. Read the user message and decide if it is asking about git changes, commit messages, diffs, or code review of local modifications.
 
 Respond with exactly one word: YES or NO.
@@ -219,22 +265,15 @@ proc doChatCompletion*(config: AppConfig, prompt: string): string =
   if baseUrl.len == 0:
     baseUrl = "https://api.openai.com/v1"
   let url = baseUrl & "/chat/completions"
-  let client = newHttpClient(userAgent = "drift/1.0", timeout = HttpTimeoutMs)
-  client.headers = newHttpHeaders({
-    "Content-Type": "application/json"
-  })
-  if config.aiApiKey.len > 0:
-    client.headers["Authorization"] = "Bearer " & config.aiApiKey
+  let client = newChatClient(config)
   let body = makeChatRequest(config, prompt)
   try:
-    let resp = client.request(url, httpMethod = HttpPost, body = body)
+    let resp = retryableRequest(client, url, body)
     if resp.code.int div 100 != 2:
       return "HTTP error " & $resp.code & ": " & resp.body
-    let j = parseJson(resp.body)
-    if j.hasKey("choices") and j["choices"].kind == JArray and j["choices"].len > 0:
-      let choice = j["choices"][0]
-      if choice.hasKey("message") and choice["message"].hasKey("content"):
-        return choice["message"]["content"].getStr()
+    let parsed = parseChatResult(resp)
+    if parsed.len > 0:
+      return parsed
     return "Unexpected response: " & resp.body
   except CatchableError as e:
     return "Request failed: " & e.msg
@@ -253,22 +292,15 @@ proc doChatCompletionHistory*(config: AppConfig, prompt: string,
   if baseUrl.len == 0:
     baseUrl = "https://api.openai.com/v1"
   let url = baseUrl & "/chat/completions"
-  let client = newHttpClient(userAgent = "drift/1.0", timeout = HttpTimeoutMs)
-  client.headers = newHttpHeaders({
-    "Content-Type": "application/json"
-  })
-  if config.aiApiKey.len > 0:
-    client.headers["Authorization"] = "Bearer " & config.aiApiKey
+  let client = newChatClient(config)
   let body = makeChatRequestHistory(config, prompt, history)
   try:
-    let resp = client.request(url, httpMethod = HttpPost, body = body)
+    let resp = retryableRequest(client, url, body)
     if resp.code.int div 100 != 2:
       return "HTTP error " & $resp.code & ": " & resp.body
-    let j = parseJson(resp.body)
-    if j.hasKey("choices") and j["choices"].kind == JArray and j["choices"].len > 0:
-      let choice = j["choices"][0]
-      if choice.hasKey("message") and choice["message"].hasKey("content"):
-        return choice["message"]["content"].getStr()
+    let parsed = parseChatResult(resp)
+    if parsed.len > 0:
+      return parsed
     return "Unexpected response: " & resp.body
   except CatchableError as e:
     return "Request failed: " & e.msg

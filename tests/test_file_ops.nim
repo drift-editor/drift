@@ -27,11 +27,21 @@ assertEq(op.path, "old_backup", "del path")
 # --- detectFileOp: articles and suffixes ---
 op = detectFileOp("remove the docs/superpowers directory")
 assertEq(op.kind.int, fokDelete.int, "remove the ... directory -> delete")
-assertEq(op.path, "docs/superpowers", "article+suffix stripped")
+assertEq(op.path, "docs/superpowers", "article+suffix stripped when path has separator")
 
+# "delete the config folder" — no path separator, so it's ambiguous.
+# The qualifier "folder" is kept to avoid false positives like "delete the build".
 op = detectFileOp("delete the config folder")
-assertEq(op.kind.int, fokDelete.int, "delete the ... folder -> delete")
-assertEq(op.path, "config", "article+folder stripped")
+assertEq(op.kind.int, fokNone.int, "ambiguous single-word + qualifier -> none")
+
+# But "delete the config" without qualifier still works if the result is path-like.
+op = detectFileOp("delete the config")
+assertEq(op.kind.int, fokDelete.int, "delete the ... -> delete")
+assertEq(op.path, "config", "article stripped, single-word path")
+
+op = detectFileOp("delete the config.yml")
+assertEq(op.kind.int, fokDelete.int, "delete the ... with extension -> delete")
+assertEq(op.path, "config.yml", "article stripped, extension path")
 
 # --- detectFileOp: quoted paths ---
 op = detectFileOp("remove \"my file.txt\"")
