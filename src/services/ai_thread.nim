@@ -39,6 +39,10 @@ type
     workspaceRoot*: string
     config*: AppConfig
     shuttingDown*: Atomic[bool]
+    history: seq[ChatTurn]   ## Multi-turn conversation memory (built-in HTTP agent)
+
+const
+  MaxHistoryTurns* = 20   ## Cap conversation history to bound memory growth.
 
 proc sendResponse(t: AIThread, msg: AIMessage) {.inline.} =
   if t.respChan.isClosed or t.shuttingDown.load(moAcquire):
@@ -449,21 +453,29 @@ proc runBuiltinAI(t: AIThread) {.thread.} =
     case req.kind
     of amkSendMessage:
       var promptText = req.text
-      # Use the lightweight model to detect git-related intent, then attach
+      # Use the lightweight model to detect git-related intent ONCE, then attach
       # local status + diff so the main model can answer without tool access.
-      if classifyGitIntent(t.config, req.text):
+      let isGitIntent = classifyGitIntent(t.config, req.text)
+      if isGitIntent:
         let gitContext = buildGitContextPrompt(t.workspaceRoot, req.text)
         if gitContext.len > 0:
           promptText = gitContext
-      let answer = doChatCompletion(t.config, promptText)
+      # Send the prompt with multi-turn conversation history for context memory.
+      let answer = doChatCompletionHistory(t.config, promptText, t.history)
       if answer.startsWith("HTTP error") or answer.startsWith("Request failed") or answer.startsWith("Unexpected response"):
         t.sendResponse(AIMessage(kind: amkError, error: answer))
       else:
+        # Record this turn into history (user prompt + assistant reply).
+        t.history.add((role: ChatRoleUser, content: req.text))
+        t.history.add((role: ChatRoleAssistant, content: answer))
+        # Prune oldest turns to bound memory growth.
+        while t.history.len > MaxHistoryTurns * 2:
+          t.history.delete(0)
         # Agent-like execution: if the user asked to commit local changes and we
         # attached git context, treat the model output as the commit message,
         # stage all changes, commit, and report the result.
         var finalText = answer
-        if promptText != req.text and classifyGitIntent(t.config, req.text):
+        if promptText != req.text and isGitIntent:
           let message = answer.strip()
           if message.len > 0:
             if gitcmd.stageAllChanges(t.workspaceRoot) and gitcmd.commitChanges(t.workspaceRoot, message):
@@ -473,7 +485,8 @@ proc runBuiltinAI(t: AIThread) {.thread.} =
         t.sendResponse(AIMessage(kind: amkResponseChunk, text: finalText))
         t.sendResponse(AIMessage(kind: amkResponseDone))
     of amkNewSession, amkClearSession:
-      discard
+      # Start a fresh conversation: clear multi-turn history.
+      t.history.setLen(0)
     of amkShutdown:
       break
     of amkCancel:

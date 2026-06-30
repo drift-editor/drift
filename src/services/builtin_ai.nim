@@ -7,11 +7,19 @@ import ../core/config
 import ../services/git as gitcmd
 import prompt_complexity
 
-type BuiltinModelProvider* = object
-  id*: string
-  label*: string
-  baseUrl*: string
-  models*: seq[string]
+const
+  HttpTimeoutMs* = 60_000   ## Per-request timeout for built-in HTTP calls.
+  ChatRoleUser* = "user"
+  ChatRoleAssistant* = "assistant"
+
+type
+  BuiltinModelProvider* = object
+    id*: string
+    label*: string
+    baseUrl*: string
+    models*: seq[string]
+
+  ChatTurn* = tuple[role: string, content: string]
 
 const BuiltinModelProviders* = [
   BuiltinModelProvider(
@@ -71,7 +79,8 @@ proc allBuiltinModels*(): seq[tuple[providerId, model, label: string]] =
       result.add((mp.id, m, mp.label & " — " & m))
 
 proc makeChatRequest*(config: AppConfig, prompt: string): string =
-  ## Build OpenAI-compatible /chat/completions request body.
+  ## Build OpenAI-compatible /chat/completions request body (single-turn, kept
+  ## for backward compatibility/tests).
   let (_, model) = resolveBuiltinModel(config, prompt)
   let messages = %*[{"role": "user", "content": prompt}]
   let body = %*{
@@ -81,8 +90,25 @@ proc makeChatRequest*(config: AppConfig, prompt: string): string =
   }
   return $body
 
+proc makeChatRequestHistory*(config: AppConfig, prompt: string,
+                             history: seq[ChatTurn]): string =
+  ## Build OpenAI-compatible /chat/completions request body with multi-turn
+  ## conversation history. ``history`` carries prior user/assistant turns
+  ## (most-recent-last); the new user prompt is appended as the final message.
+  let (_, model) = resolveBuiltinModel(config, prompt)
+  var messages = newJArray()
+  for turn in history:
+    messages.add(%*{"role": turn.role, "content": turn.content})
+  messages.add(%*{"role": "user", "content": prompt})
+  let body = %*{
+    "model": model,
+    "messages": messages,
+    "stream": false
+  }
+  return $body
+
 proc doChatCompletionWithModel*(config: AppConfig, prompt, providerId, model: string): string =
-  ## Synchronous HTTP call to a specific provider/model.
+  ## Synchronous HTTP call to a specific provider/model (single-turn).
   ## Returns the assistant message content, or an error string starting with
   ## "HTTP error", "Request failed", or "Unexpected response".
   var baseUrl = config.aiBaseUrl
@@ -91,7 +117,7 @@ proc doChatCompletionWithModel*(config: AppConfig, prompt, providerId, model: st
   if baseUrl.len == 0:
     baseUrl = "https://api.openai.com/v1"
   let url = baseUrl & "/chat/completions"
-  let client = newHttpClient(userAgent = "drift/1.0")
+  let client = newHttpClient(userAgent = "drift/1.0", timeout = HttpTimeoutMs)
   client.headers = newHttpHeaders({
     "Content-Type": "application/json"
   })
@@ -183,7 +209,7 @@ proc buildGitContextPrompt*(repoRoot, userText: string): string =
   result.add("If the user wants a commit message, respond ONLY with the commit message text (conventional commit style: type[scope]: summary). Otherwise answer their question using the diff above. Do not say you cannot access files or git data.\n")
 
 proc doChatCompletion*(config: AppConfig, prompt: string): string =
-  ## Synchronous HTTP call to the configured endpoint.
+  ## Synchronous HTTP call to the configured endpoint (single-turn).
   ## Returns the assistant message content, or an error string starting with
   ## "HTTP error", "Request failed", or "Unexpected response".
   let (providerId, _) = resolveBuiltinModel(config, prompt)
@@ -193,13 +219,47 @@ proc doChatCompletion*(config: AppConfig, prompt: string): string =
   if baseUrl.len == 0:
     baseUrl = "https://api.openai.com/v1"
   let url = baseUrl & "/chat/completions"
-  let client = newHttpClient(userAgent = "drift/1.0")
+  let client = newHttpClient(userAgent = "drift/1.0", timeout = HttpTimeoutMs)
   client.headers = newHttpHeaders({
     "Content-Type": "application/json"
   })
   if config.aiApiKey.len > 0:
     client.headers["Authorization"] = "Bearer " & config.aiApiKey
   let body = makeChatRequest(config, prompt)
+  try:
+    let resp = client.request(url, httpMethod = HttpPost, body = body)
+    if resp.code.int div 100 != 2:
+      return "HTTP error " & $resp.code & ": " & resp.body
+    let j = parseJson(resp.body)
+    if j.hasKey("choices") and j["choices"].kind == JArray and j["choices"].len > 0:
+      let choice = j["choices"][0]
+      if choice.hasKey("message") and choice["message"].hasKey("content"):
+        return choice["message"]["content"].getStr()
+    return "Unexpected response: " & resp.body
+  except CatchableError as e:
+    return "Request failed: " & e.msg
+  finally:
+    client.close()
+
+proc doChatCompletionHistory*(config: AppConfig, prompt: string,
+                              history: seq[ChatTurn]): string =
+  ## Synchronous HTTP call to the configured endpoint with multi-turn history.
+  ## Returns the assistant message content, or an error string starting with
+  ## "HTTP error", "Request failed", or "Unexpected response".
+  let (providerId, _) = resolveBuiltinModel(config, prompt)
+  var baseUrl = config.aiBaseUrl
+  if baseUrl.len == 0:
+    baseUrl = defaultBaseUrl(providerId)
+  if baseUrl.len == 0:
+    baseUrl = "https://api.openai.com/v1"
+  let url = baseUrl & "/chat/completions"
+  let client = newHttpClient(userAgent = "drift/1.0", timeout = HttpTimeoutMs)
+  client.headers = newHttpHeaders({
+    "Content-Type": "application/json"
+  })
+  if config.aiApiKey.len > 0:
+    client.headers["Authorization"] = "Bearer " & config.aiApiKey
+  let body = makeChatRequestHistory(config, prompt, history)
   try:
     let resp = client.request(url, httpMethod = HttpPost, body = body)
     if resp.code.int div 100 != 2:

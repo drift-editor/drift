@@ -2485,7 +2485,7 @@ proc run*(app: App) =
       of amkResponseDone:
         app.aiPanel.finalizeMessage()
       of amkThinking:
-        app.aiPanel.appendText(resp.text)
+        app.aiPanel.appendThinking(resp.text)
       of amkFileChanged:
         let path = resp.text
         stderr.writeLine("[app] AI changed file: " & path)

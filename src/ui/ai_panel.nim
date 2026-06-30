@@ -16,6 +16,9 @@ const
   ButtonWidth = 90
   ButtonHeight = 24
   ModelButtonWidth = 112
+  MaxMessages = 200        ## Cap stored messages to bound memory growth.
+  MaxInputLen = 8000       ## Cap input text to prevent pathological input.
+  StreamingAnimFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 proc runeByteOffsets(s: string): seq[int] =
   ## Return the byte offset of every rune boundary, starting with 0 and ending with s.len.
@@ -49,12 +52,14 @@ type
   ChatMessage* = object
     role*: string
     content*: string
+    thinking*: string   ## Reasoning/thinking content, shown separately (muted)
 
   BubbleLayout = object
     x, y, w, h: int
     textColor: Color
     bgColor: Color
     wrappedLines: seq[string]
+    thinkingLines: seq[string]
     messageIndex: int
 
   AIPanel* = ref object
@@ -116,11 +121,17 @@ proc sendCurrentMessage*(panel: AIPanel) =
   if text.len == 0:
     return
   panel.messages.add(ChatMessage(role: "user", content: text))
+  # Prune oldest messages to bound memory growth.
+  while panel.messages.len > MaxMessages:
+    panel.messages.delete(0)
   panel.inputText = ""
   panel.cursorPos = 0
   panel.cursorVisible = true
   panel.lastBlinkTick = getTicks()
-  panel.userScrolledUp = false
+  # Only auto-scroll to the new message if the user is already near the bottom.
+  # If they scrolled up to read history, keep their position.
+  if not panel.userScrolledUp:
+    panel.scrollOffset = high(int)  ## Will be clamped to bottom during render
   if panel.onSend != nil:
     panel.onSend(text)
 
@@ -139,6 +150,18 @@ proc appendText*(panel: AIPanel, chunk: string) =
     panel.messages.add(ChatMessage(role: "assistant", content: chunk))
   else:
     panel.messages[^1].content &= chunk
+  if not panel.userScrolledUp:
+    panel.scrollOffset = high(int)  ## Will be clamped to bottom during render
+
+proc appendThinking*(panel: AIPanel, chunk: string) =
+  ## Append a thinking/reasoning chunk to the current (or a new) assistant
+  ## message. Thinking content is stored separately and rendered muted, so it
+  ## never merges into the response text.
+  panel.isStreaming = true
+  if panel.messages.len == 0 or panel.messages[^1].role != "assistant":
+    panel.messages.add(ChatMessage(role: "assistant", content: "", thinking: chunk))
+  else:
+    panel.messages[^1].thinking &= chunk
   if not panel.userScrolledUp:
     panel.scrollOffset = high(int)  ## Will be clamped to bottom during render
 
@@ -179,14 +202,31 @@ proc bubbleTextColorFor(bg: Color): Color =
 proc wrapTextToWidth(text: string, font: Font, maxW: int): seq[string] =
   if text.len == 0:
     return @[]
+  if maxW <= 0:
+    return @[text]
   var lines: seq[string]
   for rawLine in text.split('\n'):
     var currentLine = ""
     for word in rawLine.split(' '):
-      let test = if currentLine.len > 0: currentLine & " " & word else: word
+      # If a single word is wider than maxW, hard-break it by character so long
+      # URLs/identifiers don't overflow the bubble.
+      var w = word
+      while font.measureText(w).w > maxW and w.len > 1:
+        # Find the longest prefix of w that fits.
+        var cut = w.len
+        while cut > 1 and font.measureText(w[0..<cut]).w > maxW:
+          dec cut
+        if cut < 1: cut = 1
+        let chunk = w[0..<cut]
+        if currentLine.len > 0:
+          lines.add(currentLine)
+          currentLine = ""
+        lines.add(chunk)
+        w = w[cut..^1]
+      let test = if currentLine.len > 0: currentLine & " " & w else: w
       if font.measureText(test).w > maxW and currentLine.len > 0:
         lines.add(currentLine)
-        currentLine = word
+        currentLine = w
       else:
         currentLine = test
     if currentLine.len > 0:
@@ -315,7 +355,8 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
         return true
     return false
   of KeyC:
-    if CtrlPressed in e.mods and ShiftPressed in e.mods:
+    let copyMod = when defined(macosx): GuiPressed else: CtrlPressed
+    if copyMod in e.mods and ShiftPressed in e.mods:
       discard panel.copyLastAssistantMessage()
       return true
   of KeyPeriod:
@@ -340,6 +381,9 @@ proc handleTextInput*(panel: AIPanel, e: Event): bool =
     text.add(c)
   if text.len == 0 or text == "\b" or text == "\x7F":
     return false  # Backspace handled in handleKey
+  # Enforce input length limit to prevent pathological input.
+  if panel.inputText.len + text.len > MaxInputLen:
+    return false
   if panel.cursorPos < panel.inputText.len:
     panel.inputText = panel.inputText[0..<panel.cursorPos] & text & panel.inputText[panel.cursorPos..^1]
   else:
@@ -440,28 +484,35 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
     let isUser = msg.role == "user"
     let bgColor = if isUser: currentTheme.getColor(tcAccent) else: currentTheme.getColor(tcBackground)
 
-    let lines = msg.content.splitLines()
     var wrappedLines: seq[string]
     var totalH = 0
-    for line in lines:
-      let ext = font.measureText(line)
-      if ext.w <= maxW:
-        wrappedLines.add(line)
+    # Thinking section (assistant only): shown as muted, prefixed with a label.
+    var thinkingLines: seq[string]
+    if not isUser and msg.thinking.len > 0:
+      thinkingLines.add("💭 Thinking")
+      totalH += fm.lineHeight
+      for tl in wrapTextToWidth(msg.thinking, font, maxW):
+        thinkingLines.add(tl)
         totalH += fm.lineHeight
+      # A blank separator line between thinking and the response.
+      thinkingLines.add("")
+      totalH += fm.lineHeight
+    # Main content (use the shared wrapper that hard-breaks long words).
+    if msg.content.len > 0:
+      for wl in wrapTextToWidth(msg.content, font, maxW):
+        wrappedLines.add(wl)
+        totalH += fm.lineHeight
+    elif isUser:
+      # A user message always has content; guard against empty.
+      discard
+    else:
+      # Assistant message with only thinking and no content yet: show a
+      # placeholder so the bubble isn't zero-height while streaming.
+      if thinkingLines.len > 0 and msg.content.len == 0 and panel.isStreaming:
+        discard  # thinking already gives height
       else:
-        var currentLine = ""
-        for word in line.split(' '):
-          let test = if currentLine.len > 0: currentLine & " " & word else: word
-          let testW = font.measureText(test).w
-          if testW > maxW and currentLine.len > 0:
-            wrappedLines.add(currentLine)
-            totalH += fm.lineHeight
-            currentLine = word
-          else:
-            currentLine = test
-        if currentLine.len > 0:
-          wrappedLines.add(currentLine)
-          totalH += fm.lineHeight
+        wrappedLines.add("")
+        totalH += fm.lineHeight
 
     let bubbleH = totalH + MessagePadding * 2
     let bubbleW = bounds.w - MessagePadding * 2
@@ -475,6 +526,7 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
       textColor: bubbleTextColorFor(bgColor),
       bgColor: bgColor,
       wrappedLines: wrappedLines,
+      thinkingLines: thinkingLines,
       messageIndex: i
     ))
     y += bubbleH + MessageGap
@@ -582,15 +634,22 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
       fillRect(rect(bubble.x + bubble.w - 1, drawY, 1, bubble.h), borderC)
 
       var lineY = drawY + MessagePadding
+      # Thinking section: rendered first, in muted color.
+      for line in bubble.thinkingLines:
+        discard font.drawText(bubble.x + MessagePadding, lineY, line, textMuted, color(0, 0, 0, 0))
+        lineY += fm.lineHeight
       for line in bubble.wrappedLines:
         discard font.drawText(bubble.x + MessagePadding, lineY, line, bubble.textColor, color(0, 0, 0, 0))
         lineY += fm.lineHeight
 
-  # Streaming indicator
+  # Streaming indicator: animated braille spinner that cycles over time.
   if panel.isStreaming:
     let indicatorY = messagesY + contentHeight - fm.lineHeight - panel.scrollOffset
     if indicatorY > messagesY and indicatorY < messagesY + messagesH:
-      discard font.drawText(bounds.x + MessagePadding, indicatorY, ".", textMuted, color(0, 0, 0, 0))
+      let ticks = getTicks()
+      let frame = (ticks div 100) mod StreamingAnimFrames.len
+      let spinner = StreamingAnimFrames[frame]
+      discard font.drawText(bounds.x + MessagePadding, indicatorY, spinner, textMuted, color(0, 0, 0, 0))
 
   restoreState()
 
