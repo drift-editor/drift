@@ -28,7 +28,7 @@ const BuiltinModelProviders* = [
     id: "openai",
     label: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
-    models: @["gpt-4o", "gpt-4o-mini", "o1", "o3-mini"]
+    models: @["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "o3", "o4-mini"]
   ),
   BuiltinModelProvider(
     id: "deepseek",
@@ -37,22 +37,40 @@ const BuiltinModelProviders* = [
     models: @["deepseek-v4-flash", "deepseek-v4-pro"]
   ),
   BuiltinModelProvider(
+    id: "anthropic",
+    label: "Anthropic",
+    baseUrl: "https://api.anthropic.com/v1",
+    models: @["claude-sonnet-4-6", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5"]
+  ),
+  BuiltinModelProvider(
     id: "moonshot",
     label: "Moonshot",
     baseUrl: "https://api.moonshot.cn/v1",
     models: @["kimi-for-coding"]
   ),
   BuiltinModelProvider(
-    id: "groq",
-    label: "Groq",
-    baseUrl: "https://api.groq.com/openai/v1",
-    models: @["llama-3.3-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it"]
+    id: "google",
+    label: "Google Gemini",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    models: @["gemini-3.5-flash", "gemini-3.1-pro", "gemini-3.1-flash-lite"]
+  ),
+  BuiltinModelProvider(
+    id: "zhipu",
+    label: "Zhipu GLM",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    models: @["glm-5", "glm-4-plus", "glm-4-flash"]
+  ),
+  BuiltinModelProvider(
+    id: "minimax",
+    label: "MiniMax",
+    baseUrl: "https://api.minimaxi.com/v1",
+    models: @["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"]
   ),
   BuiltinModelProvider(
     id: "openrouter",
     label: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1",
-    models: @["openai/gpt-4o", "anthropic/claude-3.5-sonnet", "deepseek/deepseek-chat"]
+    models: @["anthropic/claude-sonnet-4", "meta-llama/llama-4-maverick"]
   ),
 ]
 
@@ -80,14 +98,22 @@ proc allBuiltinModels*(): seq[tuple[providerId, model, label: string]] =
     for m in mp.models:
       result.add((mp.id, m, mp.label & " — " & m))
 
-proc newChatClient(config: AppConfig): HttpClient =
+proc isAnthropicProvider*(providerId: string): bool =
+  ## Check if provider uses Anthropic API format (not OpenAI-compatible).
+  providerId.toLowerAscii() == "anthropic"
+
+proc newChatClient(config: AppConfig, providerId: string = ""): HttpClient =
   ## Create a shared HTTP client with auth headers for chat completions.
   result = newHttpClient(userAgent = "drift/1.0", timeout = HttpTimeoutMs)
   result.headers = newHttpHeaders({
     "Content-Type": "application/json"
   })
   if config.aiApiKey.len > 0:
-    result.headers["Authorization"] = "Bearer " & config.aiApiKey
+    if isAnthropicProvider(providerId):
+      result.headers["x-api-key"] = config.aiApiKey
+      result.headers["anthropic-version"] = "2023-06-01"
+    else:
+      result.headers["Authorization"] = "Bearer " & config.aiApiKey
 
 proc parseChatResult(resp: Response): string =
   ## Parse an OpenAI-compatible chat completion response body.
@@ -98,6 +124,41 @@ proc parseChatResult(resp: Response): string =
     if choice.hasKey("message") and choice["message"].hasKey("content"):
       return choice["message"]["content"].getStr()
   return ""
+
+proc parseAnthropicResult(resp: Response): string =
+  ## Parse Anthropic Messages API response body.
+  ## Returns the assistant message content, or an empty string on failure.
+  let j = parseJson(resp.body)
+  if j.hasKey("content") and j["content"].kind == JArray and j["content"].len > 0:
+    let contentBlock = j["content"][0]
+    if contentBlock.hasKey("text"):
+      return contentBlock["text"].getStr()
+  return ""
+
+proc buildAnthropicRequest*(config: AppConfig, prompt: string): string =
+  ## Build Anthropic Messages API request body (single-turn).
+  let (_, model) = resolveBuiltinModel(config, prompt)
+  let body = %*{
+    "model": model,
+    "max_tokens": 4096,
+    "messages": [{"role": "user", "content": prompt}]
+  }
+  return $body
+
+proc buildAnthropicRequestHistory*(config: AppConfig, prompt: string,
+                                   history: seq[ChatTurn]): string =
+  ## Build Anthropic Messages API request body with multi-turn history.
+  let (_, model) = resolveBuiltinModel(config, prompt)
+  var messages = newJArray()
+  for turn in history:
+    messages.add(%*{"role": turn.role, "content": turn.content})
+  messages.add(%*{"role": "user", "content": prompt})
+  let body = %*{
+    "model": model,
+    "max_tokens": 4096,
+    "messages": messages
+  }
+  return $body
 
 proc isTransientHttpError(code: int): bool =
   ## True for status codes worth retrying (429 rate-limit, 5xx server errors).
