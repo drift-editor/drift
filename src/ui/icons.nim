@@ -48,6 +48,9 @@ var iconImages: Table[IconId, uirelays.screen.Image]
 const IconSize = 16
 var iconScale: int = 1
 
+proc backendSupportsRasterImages*(): bool {.inline.} =
+  screen.drawRelays.loadImage != nil and screen.drawRelays.drawImage != nil
+
 proc setIconScale*(scale: int) =
   iconScale = max(1, scale)
 
@@ -91,6 +94,9 @@ proc iconFileName(id: IconId): string =
   of iiNone: ""
 
 proc loadIcons*() =
+  if not backendSupportsRasterImages():
+    echo "[icons] display backend has no raster image support; icons disabled"
+    return
   let baseDir = currentSourcePath().parentDir / ".." / ".." / "resources" / "icons" / "codicons"
   let tmpDir = getTempDir() / "drift_icons"
   createDir(tmpDir)
@@ -120,12 +126,14 @@ proc loadIcons*() =
       echo "[icons] error loading ", svgPath, ": ", e.msg
 
 proc drawIcon*(id: IconId; x, y: int) =
+  if not backendSupportsRasterImages(): return
   if id == iiNone or id notin iconImages: return
   let img = iconImages[id]
   let srcSize = IconSize * iconScale
   uirelays.screen.drawImage(img, rect(0, 0, srcSize, srcSize), rect(x, y, IconSize, IconSize))
 
 proc drawIconCentered*(id: IconId; bounds: uirelays.Rect) =
+  if not backendSupportsRasterImages(): return
   if id == iiNone or id notin iconImages: return
   let img = iconImages[id]
   let x = bounds.x + (bounds.w - IconSize) div 2
