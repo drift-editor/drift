@@ -348,14 +348,23 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
     if pasteMod in e.mods:
       let text = getClipboardText()
       if text.len > 0:
-        if panel.cursorPos < panel.inputText.len:
-          panel.inputText = panel.inputText[0..<panel.cursorPos] & text & panel.inputText[panel.cursorPos..^1]
-        else:
-          panel.inputText.add(text)
-        panel.cursorPos += text.len
-        panel.cursorVisible = true
-        panel.lastBlinkTick = getTicks()
-        return true
+        # Replace the clipboard text with a normalized version (strip trailing null)
+        var cleanText = text
+        # Remove trailing null characters if any
+        while cleanText.len > 0 and cleanText[^1] == '\0':
+          cleanText.setLen(cleanText.len - 1)
+        if cleanText.len > 0:
+          # Enforce input length limit
+          if panel.inputText.len + cleanText.len > MaxInputLen:
+            cleanText = cleanText[0 ..< (MaxInputLen - panel.inputText.len)]
+          if panel.cursorPos < panel.inputText.len:
+            panel.inputText = panel.inputText[0..<panel.cursorPos] & cleanText & panel.inputText[panel.cursorPos..^1]
+          else:
+            panel.inputText.add(cleanText)
+          panel.cursorPos += cleanText.len
+          panel.cursorVisible = true
+          panel.lastBlinkTick = getTicks()
+          return true
     return false
   of KeyC:
     let copyMod = when defined(macosx): GuiPressed else: CtrlPressed
@@ -371,6 +380,32 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
     discard
   false
 
+proc handlePasteViaTextInput*(panel: AIPanel, text: string): bool =
+  ## Handle paste from the OS clipboard, typically delivered as a TextInput event
+  ## with the full clipboard content. Bypasses the character-by-character handling
+  ## that would otherwise break on multi-line or large pastes.
+  if not panel.focused:
+    return false
+  if text.len == 0:
+    return false
+  var cleanText = text
+  # Remove trailing null characters if any
+  while cleanText.len > 0 and cleanText[^1] == '\0':
+    cleanText.setLen(cleanText.len - 1)
+  if cleanText.len == 0:
+    return false
+  # Enforce input length limit
+  if panel.inputText.len + cleanText.len > MaxInputLen:
+    cleanText = cleanText[0 ..< (MaxInputLen - panel.inputText.len)]
+  if panel.cursorPos < panel.inputText.len:
+    panel.inputText = panel.inputText[0..<panel.cursorPos] & cleanText & panel.inputText[panel.cursorPos..^1]
+  else:
+    panel.inputText.add(cleanText)
+  panel.cursorPos += cleanText.len
+  panel.cursorVisible = true
+  panel.lastBlinkTick = getTicks()
+  return true
+
 proc handleTextInput*(panel: AIPanel, e: Event): bool =
   if not panel.focused:
     return false
@@ -384,6 +419,12 @@ proc handleTextInput*(panel: AIPanel, e: Event): bool =
     text.add(c)
   if text.len == 0 or text == "\b" or text == "\x7F":
     return false  # Backspace handled in handleKey
+
+  # Detect paste-like input: multi-character text arriving via TextInput.
+  # Route through the bulk paste handler to avoid issues with newlines/large text.
+  if text.len > 1:
+    return panel.handlePasteViaTextInput(text)
+
   # Enforce input length limit to prevent pathological input.
   if panel.inputText.len + text.len > MaxInputLen:
     return false
