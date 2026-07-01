@@ -443,7 +443,7 @@ proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
       let b = app.buffers[app.currentBuffer]
       if not b.isImage and b.path.len > 0:
         promptText = "Current file: " & b.path & "\nCursor at line " & $(b.ed.currentLine + 1)
-        let selText = b.ed.getSelectionText()
+        let selText = b.ed.getSelectedText()
         if selText.len > 0 and selText.len < 2000:
           promptText &= "\nSelected text:\n```\n" & selText & "\n```"
         promptText &= "\n\n" & text
