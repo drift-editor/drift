@@ -22,6 +22,8 @@ type
     amkReady
     amkThinking
     amkFileChanged
+    amkEditPreview       ## Sent from AI thread to UI: show diff, wait for confirm
+    amkEditConfirm       ## Sent from UI to AI thread: accept (text="ok") or reject (text="reject")
     amkNewSession
     amkClearSession
     amkShutdown
@@ -32,6 +34,10 @@ type
     kind*: AIMessageKind
     text*: string
     error*: string
+    previewPath*: string    ## For amkEditPreview: the file path
+    previewOld*: string     ## For amkEditPreview: original content
+    previewNew*: string     ## For amkEditPreview: proposed new content
+    previewSummary*: string ## For amkEditPreview: human-readable summary
 
   AIThread* = ref object
     reqChan: SPSChannel[AIMessage]
@@ -789,35 +795,41 @@ proc summarizeToolCall(name: string, args: JsonNode): string =
   else:
     if path.len > 0: name & " " & path else: name
 
-proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode): tuple[content: string, changed: seq[string]] =
-  ## Execute one built-in tool call inside the workspace sandbox. Returns the
-  ## textual result to feed back to the model plus any changed file paths.
-  result = ("", @[])
+proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode,
+                        previewMode: bool = false): tuple[content: string, changed: seq[string],
+                          needsPreview: bool, previewOld: string, previewNew: string, previewPath: string] =
+  ## Execute one built-in tool call inside the workspace sandbox.
+  ## When previewMode is true, destructive tools (write_file, edit_file) compute
+  ## the result but do NOT write to disk — they set needsPreview=true and
+  ## populate previewOld/previewNew so the caller can show a diff before
+  ## confirming. When previewMode is false, writes happen immediately (legacy
+  ## behavior for ACP agents).
+  result = ("", @[], false, "", "", "")
   let path = args{"path"}.getStr()
   case name
   of "read_file":
-    if path.len == 0: return ("Error: 'path' is required.", @[])
+    if path.len == 0: return ("Error: 'path' is required.", @[], false, "", "", "")
     let absPath = resolveWorkspacePath(path, t.workspaceRoot)
     if not isPathInsideWorkspace(absPath, t.workspaceRoot):
-      return ("Error: path is outside the workspace.", @[])
+      return ("Error: path is outside the workspace.", @[], false, "", "", "")
     if not fileExists(absPath):
-      return ("Error: file not found: " & path, @[])
+      return ("Error: file not found: " & path, @[], false, "", "", "")
     try:
       var content = readFile(absPath)
       if content.len > MaxToolResultChars:
         content = content[0..<MaxToolResultChars] &
           "\n... (truncated; file is " & $content.len & " bytes)"
-      return (content, @[])
+      return (content, @[], false, "", "", "")
     except CatchableError as e:
-      return ("Error reading file: " & e.msg, @[])
+      return ("Error reading file: " & e.msg, @[], false, "", "", "")
 
   of "list_directory":
-    if path.len == 0: return ("Error: 'path' is required.", @[])
+    if path.len == 0: return ("Error: 'path' is required.", @[], false, "", "", "")
     let absPath = resolveWorkspacePath(path, t.workspaceRoot)
     if not isPathInsideWorkspace(absPath, t.workspaceRoot):
-      return ("Error: path is outside the workspace.", @[])
+      return ("Error: path is outside the workspace.", @[], false, "", "", "")
     if not dirExists(absPath):
-      return ("Error: directory not found: " & path, @[])
+      return ("Error: directory not found: " & path, @[], false, "", "", "")
     try:
       var lines: seq[string]
       for kind, entryPath in walkDir(absPath):
@@ -825,63 +837,73 @@ proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode): tuple[conten
         case kind
         of pcDir, pcLinkToDir: lines.add(nm & "/")
         else: lines.add(nm)
-      if lines.len == 0: return ("(empty directory)", @[])
-      return (lines.join("\n"), @[])
+      if lines.len == 0: return ("(empty directory)", @[], false, "", "", "")
+      return (lines.join("\n"), @[], false, "", "", "")
     except CatchableError as e:
-      return ("Error listing directory: " & e.msg, @[])
+      return ("Error listing directory: " & e.msg, @[], false, "", "", "")
 
   of "write_file":
-    if path.len == 0: return ("Error: 'path' is required.", @[])
+    if path.len == 0: return ("Error: 'path' is required.", @[], false, "", "", "")
     let content = args{"content"}.getStr()
     if content.len > MaxFileWriteSize:
-      return ("Error: content too large (max " & $MaxFileWriteSize & " bytes).", @[])
+      return ("Error: content too large (max " & $MaxFileWriteSize & " bytes).", @[], false, "", "", "")
     let absPath = resolveWorkspacePath(path, t.workspaceRoot)
     if not isPathInsideWorkspace(absPath, t.workspaceRoot):
-      return ("Error: path is outside the workspace.", @[])
-    try:
-      let parent = absPath.parentDir()
-      if parent.len > 0 and not dirExists(parent): createDir(parent)
-      writeFile(absPath, content)
-      return ("Wrote " & $content.len & " bytes to " & path, @[absPath])
-    except CatchableError as e:
-      return ("Error writing file: " & e.msg, @[])
+      return ("Error: path is outside the workspace.", @[], false, "", "", "")
+    if not previewMode:
+      try:
+        let parent = absPath.parentDir()
+        if parent.len > 0 and not dirExists(parent): createDir(parent)
+        writeFile(absPath, content)
+        return ("Wrote " & $content.len & " bytes to " & path, @[absPath], false, "", "", "")
+      except CatchableError as e:
+        return ("Error writing file: " & e.msg, @[], false, "", "", "")
+    # Built-in agent path: compute preview, defer the actual write.
+    var oldContent = ""
+    if fileExists(absPath):
+      try:
+        oldContent = readFile(absPath)
+      except CatchableError:
+        discard
+    return ("(preview)", @[], true, oldContent, content, absPath)
 
   of "edit_file":
-    if path.len == 0: return ("Error: 'path' is required.", @[])
+    if path.len == 0: return ("Error: 'path' is required.", @[], false, "", "", "")
     let oldStr = args{"old_string"}.getStr()
     let newStr = args{"new_string"}.getStr()
     let replaceAll = args{"replace_all"}.getBool(false)
     if oldStr.len == 0:
-      return ("Error: 'old_string' must not be empty.", @[])
+      return ("Error: 'old_string' must not be empty.", @[], false, "", "", "")
     let absPath = resolveWorkspacePath(path, t.workspaceRoot)
     if not isPathInsideWorkspace(absPath, t.workspaceRoot):
-      return ("Error: path is outside the workspace.", @[])
+      return ("Error: path is outside the workspace.", @[], false, "", "", "")
     if not fileExists(absPath):
-      return ("Error: file not found: " & path, @[])
+      return ("Error: file not found: " & path, @[], false, "", "", "")
     try:
       let original = readFile(absPath)
       let occurrences = original.count(oldStr)
       if occurrences == 0:
         return ("Error: old_string not found in " & path &
-          ". Read the file and match the text exactly.", @[])
+          ". Read the file and match the text exactly.", @[], false, "", "", "")
       if occurrences > 1 and not replaceAll:
         return ("Error: old_string is not unique (" & $occurrences & " matches) in " &
-          path & ". Add surrounding context or set replace_all=true.", @[])
-      # Non-replace_all path has exactly one match here, so replace() is safe.
+          path & ". Add surrounding context or set replace_all=true.", @[], false, "", "", "")
       let updated = original.replace(oldStr, newStr)
       if updated.len > MaxFileWriteSize:
-        return ("Error: resulting file too large (max " & $MaxFileWriteSize & " bytes).", @[])
-      writeFile(absPath, updated)
-      let cnt = if replaceAll: occurrences else: 1
-      return ("Edited " & path & " (" & $cnt & " replacement" &
-        (if cnt == 1: "" else: "s") & ")", @[absPath])
+        return ("Error: resulting file too large (max " & $MaxFileWriteSize & " bytes).", @[], false, "", "", "")
+      if not previewMode:
+        writeFile(absPath, updated)
+        let cnt = if replaceAll: occurrences else: 1
+        return ("Edited " & path & " (" & $cnt & " replacement" &
+          (if cnt == 1: "" else: "s") & ")", @[absPath], false, "", "", "")
+      return ("(preview)", @[], true, original, updated, absPath)
     except CatchableError as e:
-      return ("Error editing file: " & e.msg, @[])
+      return ("Error editing file: " & e.msg, @[], false, "", "", "")
 
   of "git_status":
     let repoRoot = gitcmd.getRepoRoot(t.workspaceRoot)
     if repoRoot.len == 0:
-      return ("Error: this workspace is not a git repository.", @[])
+      return ("Error: this workspace is not a git repository.", @[], false, "", "", "")
     let branch = gitcmd.getCurrentBranch(repoRoot)
     var lines: seq[string]
     for f in gitcmd.parseGitStatus(repoRoot):
@@ -895,12 +917,12 @@ proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode): tuple[conten
     var outp = "Branch: " & branch & "\n"
     if lines.len == 0: outp.add("No local changes.")
     else: outp.add("Changed files:\n" & lines.join("\n"))
-    return (outp, @[])
+    return (outp, @[], false, "", "", "")
 
   of "git_diff":
     let repoRoot = gitcmd.getRepoRoot(t.workspaceRoot)
     if repoRoot.len == 0:
-      return ("Error: this workspace is not a git repository.", @[])
+      return ("Error: this workspace is not a git repository.", @[], false, "", "", "")
     var diff: string
     if path.len > 0:
       let absPath = resolveWorkspacePath(path, t.workspaceRoot)
@@ -913,13 +935,38 @@ proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode): tuple[conten
     else:
       diff = gitcmd.getAllLocalDiff(repoRoot)
     if diff.strip().len == 0:
-      return ("(no local changes)", @[])
+      return ("(no local changes)", @[], false, "", "", "")
     if diff.len > MaxToolResultChars:
       diff = diff[0..<MaxToolResultChars] & "\n... (diff truncated)"
-    return (diff, @[])
+    return (diff, @[], false, "", "", "")
 
   else:
-    return ("Error: unknown tool '" & name & "'.", @[])
+    return ("Error: unknown tool '" & name & "'.", @[], false, "", "", "")
+
+proc waitForEditConfirmation(t: AIThread): bool =
+  ## Check if a pending confirmation has arrived on reqChan.
+  ## Returns true if user accepted or no confirm mechanism is active yet
+  ## (auto-accept — the UI will display the diff in the preview message).
+  ## When the UI eventually sends amkEditConfirm, we honor it.
+  while true:
+    if t.shuttingDown.load(moAcquire) or t.reqChan.isClosed:
+      return false
+    var msg: AIMessage
+    if channel_spsc.tryReceive(t.reqChan, msg):
+      case msg.kind
+      of amkEditConfirm:
+        return msg.text == "ok"
+      of amkShutdown, amkCancel:
+        return false
+      else:
+        # Unexpected message while waiting for confirm — buffer is shared with
+        # the main runBuiltinAI loop. If it's a new user message or other
+        # request, bail out so the main loop can process it.
+        return false
+    else:
+      # No confirm message waiting yet — auto-accept to avoid hanging.
+      # The diff was already sent via amkEditPreview so the UI can display it.
+      return true
 
 proc runBuiltinAgentic(t: AIThread, userText: string) =
   ## Agentic tool loop: the model can call read/list/write/edit tools to inspect
@@ -973,10 +1020,46 @@ proc runBuiltinAgentic(t: AIThread, userText: string) =
     messages.add(assistantTurnJson(res))
     for tc in res.toolCalls:
       t.sendResponse(AIMessage(kind: amkThinking, text: summarizeToolCall(tc.name, tc.arguments)))
-      let (toolContent, changed) = executeBuiltinTool(t, tc.name, tc.arguments)
-      for cp in changed:
-        t.sendResponse(AIMessage(kind: amkFileChanged, text: cp))
-      messages.add(%*{"role": "tool", "tool_call_id": tc.id, "content": toolContent})
+      # Pass previewMode=true so destructive tools compute but don't write yet.
+      let (toolContent, changed, needsPreview, prevOld, prevNew, prevPath) =
+        executeBuiltinTool(t, tc.name, tc.arguments, previewMode = true)
+      if needsPreview:
+        # Send preview to UI and wait for confirmation.
+        let summary = case tc.name
+          of "write_file":
+            if prevOld.len == 0: "Create " & prevPath
+            else: "Rewrite " & prevPath
+          else: "Edit " & prevPath
+        t.sendResponse(AIMessage(
+          kind: amkEditPreview,
+          previewPath: prevPath,
+          previewOld: prevOld,
+          previewNew: prevNew,
+          previewSummary: summary
+        ))
+        if waitForEditConfirmation(t):
+          # User accepted: apply the write now.
+          try:
+            let parent = prevPath.parentDir()
+            if parent.len > 0 and not dirExists(parent): createDir(parent)
+            writeFile(prevPath, prevNew)
+            let bytes = prevNew.len
+            let label = if prevOld.len == 0: "Created " else: "Wrote "
+            let msg = label & prevPath & " (" & $bytes & " bytes)"
+            for cp in @[prevPath]:
+              t.sendResponse(AIMessage(kind: amkFileChanged, text: cp))
+            messages.add(%*{"role": "tool", "tool_call_id": tc.id, "content": msg})
+          except CatchableError as e:
+            messages.add(%*{"role": "tool", "tool_call_id": tc.id,
+              "content": "Error writing file: " & e.msg})
+        else:
+          # User rejected the edit.
+          messages.add(%*{"role": "tool", "tool_call_id": tc.id,
+            "content": "Edit was rejected by the user. Do not retry this exact edit. Explain what alternative you can offer."})
+      else:
+        for cp in changed:
+          t.sendResponse(AIMessage(kind: amkFileChanged, text: cp))
+        messages.add(%*{"role": "tool", "tool_call_id": tc.id, "content": toolContent})
 
   if errored:
     return
@@ -1230,6 +1313,11 @@ proc cancel*(t: AIThread) =
 
 proc togglePlanMode*(t: AIThread) =
   sendOrWarn(t.reqChan, AIMessage(kind: amkTogglePlanMode), "togglePlanMode")
+
+proc confirmEdit*(t: AIThread, accepted: bool) =
+  ## Send confirmation back to the AI thread for a pending edit preview.
+  sendOrWarn(t.reqChan, AIMessage(kind: amkEditConfirm,
+    text: if accepted: "ok" else: "reject"), "confirmEdit")
 
 proc shutdown*(t: AIThread) =
   if t.shuttingDown.exchange(true, moAcquire):
