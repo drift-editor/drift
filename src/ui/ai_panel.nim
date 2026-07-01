@@ -13,8 +13,6 @@ const
   ToolbarHeight = 24
   MessagePadding = 8
   MessageGap = 4
-  ButtonWidth = 90
-  ButtonHeight = 24
   ModelButtonWidth = 112
   MaxMessages = 200        ## Cap stored messages to bound memory growth.
   MaxInputLen = 8000       ## Cap input text to prevent pathological input.
@@ -396,16 +394,22 @@ proc handleTextInput*(panel: AIPanel, e: Event): bool =
 proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
   if e.kind == MouseDownEvent:
     let inputY = bounds.y + bounds.h - InputHeight
-    let btnY = bounds.y + (HeaderHeight - ButtonHeight) div 2
 
-    # Stop button (only when streaming)
-    if panel.isStreaming:
-      let stopX = bounds.x + bounds.w - ButtonWidth * 2 - 16
-      let stopBounds = rect(stopX, btnY, ButtonWidth, ButtonHeight)
-      if stopBounds.contains(point(e.x, e.y)):
+    # Send/Stop button: inside input box, bottom-right overflow
+    let sendBtnSize = 24
+    let inputBoundsW = bounds.w - MessagePadding * 2
+    let inputBoundsY = inputY + ToolbarHeight + 6
+    let inputBoundsH = InputHeight - ToolbarHeight - 12
+    let sendBtnX = bounds.x + MessagePadding + inputBoundsW - sendBtnSize - 4
+    let sendBtnY = inputBoundsY + inputBoundsH - sendBtnSize - 4
+    let sendBtnBounds = rect(sendBtnX, sendBtnY, sendBtnSize, sendBtnSize)
+    if sendBtnBounds.contains(point(e.x, e.y)):
+      if panel.isStreaming:
         if panel.onStop != nil:
           panel.onStop()
-        return true
+      else:
+        panel.sendCurrentMessage()
+      return true
 
     # New Chat icon button: choose provider to start a new agent session
     let iconBtnSize = 28
@@ -437,7 +441,6 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
     return true
 
   if e.kind == MouseMoveEvent:
-    let btnY = bounds.y + (HeaderHeight - ButtonHeight) div 2
     let iconBtnSize = 28
     let iconBtnX = bounds.x + bounds.w - iconBtnSize - 8
     let iconBtnY = bounds.y + (HeaderHeight - iconBtnSize) div 2
@@ -455,11 +458,15 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
     else:
       let inputY = bounds.y + bounds.h - InputHeight
       panel.hoverInput = e.y >= inputY
-    if panel.isStreaming:
-      let stopX = bounds.x + bounds.w - ButtonWidth * 2 - 16
-      panel.hoverStop = rect(stopX, btnY, ButtonWidth, ButtonHeight).contains(point(e.x, e.y))
-    else:
-      panel.hoverStop = false
+    # Send button hover (inside input box, bottom-right)
+    let sendBtnSize = 24
+    let inputBoundsW = bounds.w - MessagePadding * 2
+    let inputY2 = bounds.y + bounds.h - InputHeight
+    let inputBoundsY = inputY2 + ToolbarHeight + 6
+    let inputBoundsH = InputHeight - ToolbarHeight - 12
+    let sendBtnX = bounds.x + MessagePadding + inputBoundsW - sendBtnSize - 4
+    let sendBtnY = inputBoundsY + inputBoundsH - sendBtnSize - 4
+    panel.hoverStop = rect(sendBtnX, sendBtnY, sendBtnSize, sendBtnSize).contains(point(e.x, e.y))
     return true
 
   if e.kind == MouseWheelEvent:
@@ -570,22 +577,6 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
       discard font.drawText(subtitleX, headerTextY, panel.subtitle, textMuted, color(0, 0, 0, 0))
 
   # Header buttons
-  let btnY = bounds.y + (HeaderHeight - ButtonHeight) div 2
-
-  # Stop button (only when streaming)
-  if panel.isStreaming:
-    let stopX = bounds.x + bounds.w - ButtonWidth * 2 - 16
-    let stopBorderC = if panel.hoverStop: accentC else: borderC
-    let stopBounds = rect(stopX, btnY, ButtonWidth, ButtonHeight)
-    fillRect(stopBounds, bg)
-    fillRect(rect(stopBounds.x, stopBounds.y, stopBounds.w, 1), stopBorderC)
-    fillRect(rect(stopBounds.x, stopBounds.y + stopBounds.h - 1, stopBounds.w, 1), stopBorderC)
-    fillRect(rect(stopBounds.x, stopBounds.y, 1, stopBounds.h), stopBorderC)
-    fillRect(rect(stopBounds.x + stopBounds.w - 1, stopBounds.y, 1, stopBounds.h), stopBorderC)
-    let stopLabel = "Stop"
-    let stopW = font.measureText(stopLabel).w
-    discard font.drawText(stopBounds.x + (ButtonWidth - stopW) div 2, stopBounds.y + 4, stopLabel, textC, color(0, 0, 0, 0))
-
   # New Chat icon button (soft hover fill, consistent with other icon buttons)
   let iconBtnSize = 28
   let iconBtnX = bounds.x + bounds.w - iconBtnSize - 8
@@ -711,7 +702,6 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   fillRect(rect(inputBounds.x, inputBounds.y, inputBounds.w, 1), inputBorderColor)
   fillRect(rect(inputBounds.x, inputBounds.y + inputBounds.h - 1, inputBounds.w, 1), inputBorderColor)
   fillRect(rect(inputBounds.x, inputBounds.y, 1, inputBounds.h), inputBorderColor)
-  fillRect(rect(inputBounds.x + inputBounds.w - 1, inputBounds.y, 1, inputBounds.h), inputBorderColor)
 
   let innerTextW = max(0, inputBounds.w - 16)
   let inputLines = wrapTextToWidth(panel.inputText, font, innerTextW)
@@ -738,6 +728,24 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
     let drawCursorX = inputBounds.x + 8 + cursorX
     let drawCursorY = inputBounds.y + 8 + cursorLine * fm.lineHeight
     fillRect(rect(drawCursorX, drawCursorY, 2, fm.lineHeight), textC)
+
+  # Send/stop button: inside input box at bottom-right, overflowing the border
+  let sendBtnSize = 24
+  let sendBtnX = inputBounds.x + inputBounds.w - sendBtnSize - 4
+  let sendBtnY = inputBounds.y + inputBounds.h - sendBtnSize - 4
+  let sendBtnBounds = rect(sendBtnX, sendBtnY, sendBtnSize, sendBtnSize)
+  let sendBtnBg = if panel.hoverStop: accentC else: currentTheme.getColor(tcSurfaceHover)
+  fillRect(sendBtnBounds, sendBtnBg)
+  let sendBtnBorderC = if panel.hoverStop: accentC else: borderC
+  fillRect(rect(sendBtnBounds.x, sendBtnBounds.y, sendBtnBounds.w, 1), sendBtnBorderC)
+  fillRect(rect(sendBtnBounds.x, sendBtnBounds.y + sendBtnBounds.h - 1, sendBtnBounds.w, 1), sendBtnBorderC)
+  fillRect(rect(sendBtnBounds.x, sendBtnBounds.y, 1, sendBtnBounds.h), sendBtnBorderC)
+  fillRect(rect(sendBtnBounds.x + sendBtnBounds.w - 1, sendBtnBounds.y, 1, sendBtnBounds.h), sendBtnBorderC)
+  # Icon: stop when streaming, send when idle
+  if panel.isStreaming:
+    drawIconCentered(iiStop, sendBtnBounds)
+  else:
+    drawIconCentered(iiSend, sendBtnBounds)
 
   # Resize handle at left edge
   let handleX = bounds.x + 2

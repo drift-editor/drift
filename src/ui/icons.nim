@@ -41,6 +41,8 @@ type
     iiPlay
     iiPlayGreen
     iiBug
+    iiSend
+    iiStop
 
 var iconImages: Table[IconId, uirelays.screen.Image]
 const IconSize = 16
@@ -84,6 +86,8 @@ proc iconFileName(id: IconId): string =
   of iiPlay: "play.svg"
   of iiPlayGreen: "play-green.svg"
   of iiBug: "bug.svg"
+  of iiSend: "send.svg"
+  of iiStop: "stop.svg"
   of iiNone: ""
 
 proc loadIcons*() =
