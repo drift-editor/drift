@@ -785,8 +785,15 @@ proc summarizeToolCall(name: string, args: JsonNode): string =
   ## Short human-readable label shown in the thinking area for a tool call.
   let path = args{"path"}.getStr()
   case name
-  of "read_file": "Reading " & path
+  of "read_file":
+    let startLine = args{"start_line"}.getInt(0)
+    let endLine = args{"end_line"}.getInt(0)
+    if startLine > 0 or endLine > 0:
+      "Reading " & path & " (lines " & $startLine & "-" & $endLine & ")"
+    else:
+      "Reading " & path
   of "list_directory": "Listing " & path
+  of "create_directory": "Creating directory " & path
   of "write_file": "Writing " & path
   of "edit_file": "Editing " & path
   of "git_status": "Checking git status"
@@ -816,6 +823,16 @@ proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode,
       return ("Error: file not found: " & path, @[], false, "", "", "")
     try:
       var content = readFile(absPath)
+      # Line-range support: extract lines start_line..end_line (1-based, inclusive).
+      let startLine = args{"start_line"}.getInt(0)
+      let endLine = args{"end_line"}.getInt(0)
+      if startLine > 0 or endLine > 0:
+        let lines = content.splitLines()
+        let s = if startLine > 0: startLine.int - 1 else: 0
+        let e = if endLine > 0: min(endLine.int, lines.len) else: lines.len
+        if s >= lines.len:
+          return ("Error: start_line " & $startLine & " exceeds file length (" & $lines.len & " lines).", @[], false, "", "", "")
+        content = lines[s..<e].join("\n")
       if content.len > MaxToolResultChars:
         content = content[0..<MaxToolResultChars] &
           "\n... (truncated; file is " & $content.len & " bytes)"
@@ -841,6 +858,21 @@ proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode,
       return (lines.join("\n"), @[], false, "", "", "")
     except CatchableError as e:
       return ("Error listing directory: " & e.msg, @[], false, "", "", "")
+
+  of "create_directory":
+    if path.len == 0: return ("Error: 'path' is required.", @[], false, "", "", "")
+    let absPath = resolveWorkspacePath(path, t.workspaceRoot)
+    if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+      return ("Error: path is outside the workspace.", @[], false, "", "", "")
+    if dirExists(absPath):
+      return ("Directory already exists: " & path, @[], false, "", "", "")
+    if fileExists(absPath):
+      return ("Error: a file already exists at: " & path, @[], false, "", "", "")
+    try:
+      createDir(absPath)
+      return ("Created directory: " & path, @[absPath], false, "", "", "")
+    except CatchableError as e:
+      return ("Error creating directory: " & e.msg, @[], false, "", "", "")
 
   of "write_file":
     if path.len == 0: return ("Error: 'path' is required.", @[], false, "", "", "")

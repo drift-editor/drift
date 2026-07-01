@@ -465,9 +465,13 @@ proc builtinToolDefs(planMode: bool): seq[tuple[name, description: string, param
   ## Neutral tool definitions. In plan mode only the read-only tools are offered
   ## so the model can inspect the code while planning but cannot mutate files.
   result = @[
-    ("read_file", "Read and return the full contents of a text file in the workspace.",
+    ("read_file", "Read the contents of a text file in the workspace. Optionally specify start_line and end_line (1-based, inclusive) to read a specific range.",
       %*{"type": "object",
-         "properties": {"path": {"type": "string", "description": "File path relative to the workspace root (or absolute inside it)."}},
+         "properties": {
+           "path": {"type": "string", "description": "File path relative to the workspace root (or absolute inside it)."},
+           "start_line": {"type": "integer", "description": "Optional 1-based start line. Omit to read from the beginning."},
+           "end_line": {"type": "integer", "description": "Optional 1-based end line (inclusive). Omit to read to the end."}
+         },
          "required": ["path"]}),
     ("list_directory", "List the files and subdirectories of a directory in the workspace.",
       %*{"type": "object",
@@ -481,6 +485,13 @@ proc builtinToolDefs(planMode: bool): seq[tuple[name, description: string, param
   ]
   if planMode:
     return
+  result.add(("create_directory",
+    "Create a directory (and any missing parent directories) at the given path.",
+    %*{"type": "object",
+       "properties": {
+         "path": {"type": "string", "description": "Directory path relative to the workspace root (or absolute inside it)."}
+       },
+       "required": ["path"]}))
   result.add(("write_file",
     "Create a new file or completely overwrite an existing file with the given content.",
     %*{"type": "object",
