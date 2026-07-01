@@ -1,9 +1,8 @@
-import std/[os, strutils, options, tables]
+import std/[os, options, tables]
 import uirelays
 import uirelays/screen
 import uirelays/input
 import theme, icons
-import ../utils/text
 import ../services/git as gitcmd
 
 const

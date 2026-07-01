@@ -752,39 +752,6 @@ proc groupFilesByConcern*(files: seq[GitFileChange]): seq[ChangeGroup] =
   if build.len > 0: result.add(ChangeGroup(name: "Build / Scripts", files: build))
   if other.len > 0: result.add(ChangeGroup(name: "Other", files: other))
 
-proc collectGroupDiff(repoRoot: string; group: var ChangeGroup; staged, unstaged: seq[GitFileChange]) =
-  ## Collect diff text for all files in a group.
-  var diffText = ""
-  for filePath in group.files:
-    # Check if file is staged
-    var isStaged = false
-    for s in staged:
-      if s.path == filePath:
-        isStaged = true
-        break
-    # Check if file is unstaged (or untracked)
-    var isUnstaged = false
-    for u in unstaged:
-      if u.path == filePath:
-        isUnstaged = true
-        break
-
-    if isStaged:
-      let d = gitcmd.getFileDiff(repoRoot, filePath, staged = true)
-      if d.len > 0:
-        diffText.add("### " & filePath & " (staged)\n```diff\n" & d & "\n```\n\n")
-    if isUnstaged:
-      let d = gitcmd.getFileDiff(repoRoot, filePath, staged = false)
-      if d.len > 0:
-        diffText.add("### " & filePath & " (unstaged)\n```diff\n" & d & "\n```\n\n")
-      else:
-        # Untracked file - show full content
-        let content = gitcmd.getUntrackedFileContent(repoRoot, filePath)
-        if content.len > 0:
-          diffText.add("### " & filePath & " (new file)\n```\n" & content & "\n```\n\n")
-
-  group.diff = diffText
-
 proc reviewChanges*(app: App) =
   ## Lazy agentic review: send only file list + stats, let the agent explore files and diffs via tools.
   let repoRoot = if app.gitPanel.currentPath.len > 0: app.gitPanel.currentPath else: getCurrentDir()

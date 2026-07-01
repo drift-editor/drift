@@ -1,5 +1,3 @@
-import std/strutils
-
 proc splitLinesKeep*(s: string): seq[string] =
   ## Like splitLines but preserves the trailing empty line when the string ends with a newline.
   ## Handles \\r\\n, \\r, and \\n.

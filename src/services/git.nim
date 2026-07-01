@@ -1,7 +1,6 @@
 ## Git command interface — pure git operations, no UI state.
 
 import std/[os, osproc, streams, strutils, tables]
-import ../utils/text
 
 type
   GitFileStatus* = enum

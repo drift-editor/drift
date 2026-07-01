@@ -1,5 +1,5 @@
 ## Search/Replace Panel - Sidebar integrated
-import std/[os, strutils, nre, sets, tables, osproc, locks]
+import std/[os, strutils, nre, tables, osproc, locks]
 import uirelays
 import uirelays/[coords, screen, input]
 import widgets/synedit
@@ -88,6 +88,7 @@ const ExcludedExts = [".exe", ".dll", ".so", ".dylib", ".png", ".jpg", ".jpeg",
                       ".mp4", ".avi", ".mov", ".zip", ".tar", ".gz", ".rar",
                       ".7z", ".pdf", ".doc", ".docx", ".xls", ".xlsx"]
 
+
 # Initialization
 
 proc isWordChar(c: char): bool = c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
@@ -126,45 +127,6 @@ proc buildWorkspaceGroups(panel: var SearchPanel) =
     panel.workspaceGroups[gi].matchIndices.add(i)
 
 # Search Logic
-
-proc searchInLine(line: string; pattern: string; caseSensitive, wholeWord: bool; useRegex: bool): seq[tuple[start, stop: int]] =
-  result = @[]
-  if useRegex:
-    try:
-      let rePat = re(pattern)
-      for m in line.findIter(rePat):
-        let s = m.matchBounds.a
-        let e = m.matchBounds.b
-        if wholeWord:
-          let before = if s > 0: line[s-1] else: '\0'
-          let after = if e < line.len: line[e] else: '\0'
-          if isWordChar(before) or isWordChar(after):
-            continue
-        result.add((s, e))
-    except RegexError:
-      discard
-  else:
-    let searchText = if caseSensitive: pattern else: pattern.toLowerAscii()
-    let searchTarget = if caseSensitive: line else: line.toLowerAscii()
-    let patLen = searchText.len
-    if patLen == 0: return
-    var i = 0
-    while i <= searchTarget.len - patLen:
-      var j = 0
-      while j < patLen and searchTarget[i + j] == searchText[j]:
-        inc j
-      if j == patLen:
-        let endIdx = i + patLen - 1
-        if wholeWord:
-          let before = if i > 0: searchTarget[i-1] else: '\0'
-          let after = if endIdx + 1 < searchTarget.len: searchTarget[endIdx+1] else: '\0'
-          if isWordChar(before) or isWordChar(after):
-            i += patLen
-            continue
-        result.add((i, endIdx))
-        i += patLen
-      else:
-        inc i
 
 proc findAll*(panel: var SearchPanel; ed: ptr SynEdit) =
   panel.errorText = ""
@@ -248,6 +210,10 @@ proc findAll*(panel: var SearchPanel; ed: ptr SynEdit) =
       if excludeExtArg.len > 0:
         excludeExtArg.add(" ")
       excludeExtArg.add("--glob !*/" & dir & "/*")
+    for ext in ExcludedExts:
+      if excludeExtArg.len > 0:
+        excludeExtArg.add(" ")
+      excludeExtArg.add("--glob !*" & ext)
 
     var rgFlags = "rg -n"
     if not panel.caseSensitive:
@@ -256,7 +222,7 @@ proc findAll*(panel: var SearchPanel; ed: ptr SynEdit) =
       rgFlags &= " -F"
     let rgCmd = rgFlags & " " & excludeExtArg & " " & panel.findText.quoteShell() & " ."
 
-    let (output, exitCode) = execCmdEx(rgCmd, workingDir = panel.workspaceRoot)
+    let (output, _) = execCmdEx(rgCmd, workingDir = panel.workspaceRoot)
 
     withLock(panel.workspaceSearchLock):
       panel.workspaceSearchInProgress = false
@@ -377,10 +343,6 @@ proc hide*(panel: var SearchPanel; ed: ptr SynEdit) =
   panel.resultScroll = 0
 
 # Helpers
-
-proc measureCursorX(font: Font; text: string; charIndex: int): int =
-  if charIndex <= 0: return 0
-  return measureText(font, text[0 ..< min(charIndex, text.len)]).w
 
 proc lineColAtPos(text: string; pos: int): tuple[line, col: int] =
   var line = 0
@@ -868,7 +830,6 @@ proc render*(panel: var SearchPanel; ed: ptr SynEdit; bounds: Rect) =
   y += MODE_TAB_H + 4
 
   let inputW = bounds.w - PADDING * 2
-  let toggleAreaW = TOGGLE_SIZE * 3 + 8
 
   # Find input using widget component
   let findBounds = rect(bounds.x + PADDING, y, inputW, INPUT_HEIGHT)

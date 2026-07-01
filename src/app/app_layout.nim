@@ -1,8 +1,6 @@
 ## Layout computation for the main app frame
 
-import uirelays/screen
 import uirelays/coords
-import ../ui/theme
 
 const
   SidebarWidth* = 200

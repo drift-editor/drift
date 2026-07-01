@@ -2,7 +2,7 @@
 ## Cross-platform recent files with macOS security-scoped bookmark support.
 ## Based on bale_sheet's recent_files.nim, adapted for drift.
 
-import std/[os, json, strutils, options]
+import std/[os, json, options]
 import ./security_scoped_bookmarks
 export security_scoped_bookmarks.stopAccessingAllSecurityScopedResources
 

@@ -4,7 +4,6 @@
 ## lightweight/heavyweight preset get a badge. Selecting a model triggers an
 ## action menu (Set as Light / Set as Heavy / Set API Key) via callback.
 
-import std/[strutils]
 import uirelays
 import uirelays/screen
 import uirelays/input

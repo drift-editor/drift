@@ -143,7 +143,6 @@ proc render*(picker: LocationPicker, font: Font, viewport: coords.Rect) =
   let border = currentTheme.getColor(tcBorder)
   let text = currentTheme.getColor(tcText)
   let textSecondary = currentTheme.getColor(tcTextSecondary)
-  let accent = currentTheme.getColor(tcAccent)
   let selection = currentTheme.getColor(tcSelection)
   let surfaceHover = currentTheme.getColor(tcSurfaceHover)
 
