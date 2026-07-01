@@ -1038,15 +1038,20 @@ proc runBuiltinAgentic(t: AIThread, userText: string) =
   var iterations = 0
   while iterations < MaxAgenticIterations:
     inc iterations
-    let res = doAgenticChat(t.config, provider, model, messages, t.planMode)
+    let effort = if providerSupportsThinking(provider): t.config.aiReasoningEffort else: ""
+    let res = doAgenticChat(t.config, provider, model, messages, t.planMode, effort)
     if res.error.len > 0:
       t.sendResponse(AIMessage(kind: amkError, error: res.error))
       errored = true
       break
+    # Surface the model's chain-of-thought (DeepSeek reasoning_content) as
+    # thinking, whether or not this turn ends in tool calls.
+    if res.reasoning.strip().len > 0:
+      t.sendResponse(AIMessage(kind: amkThinking, text: res.reasoning))
     if res.toolCalls.len == 0:
       finalText = res.content
       break
-    # Surface any interim reasoning text as thinking, then run the tools.
+    # Surface any interim assistant text as thinking, then run the tools.
     if res.content.strip().len > 0:
       t.sendResponse(AIMessage(kind: amkThinking, text: res.content))
     messages.add(assistantTurnJson(res))

@@ -132,6 +132,33 @@ proc isAnthropicProvider*(providerId: string): bool =
   ## Check if provider uses Anthropic API format (not OpenAI-compatible).
   providerId.toLowerAscii() == "anthropic"
 
+proc providerSupportsThinking*(providerId: string): bool =
+  ## Whether the provider exposes an explicit reasoning/thinking-mode toggle on
+  ## its OpenAI-compatible chat API. DeepSeek accepts a ``thinking`` object and
+  ## returns the chain-of-thought in ``message.reasoning_content``.
+  providerId.toLowerAscii() == "deepseek"
+
+proc reasoningVariants*(providerId: string): seq[string] =
+  ## User-selectable thinking-effort variants for a provider, least-to-most
+  ## capable. Empty when the provider has no thinking mode. These differ per
+  ## provider (DeepSeek: high/max; OpenAI: minimal/low/medium/high; Anthropic:
+  ## token budgets), so this is the single source of truth for the menu and for
+  ## request-body validation — extend the cases as more providers are wired.
+  case providerId.toLowerAscii()
+  of "deepseek": @["high", "max"]
+  else: @[]
+
+proc applyThinking*(body: JsonNode; providerId: string; effort: string = "high") =
+  ## Enable DeepSeek-style thinking mode on an OpenAI-format request body and set
+  ## the reasoning-effort variant. No-op for providers without a thinking toggle,
+  ## so other providers' bodies are left untouched. Mutates ``body`` in place.
+  if body == nil or body.kind != JObject: return
+  if not providerSupportsThinking(providerId): return
+  body["thinking"] = %*{"type": "enabled"}
+  let e = effort.toLowerAscii()
+  if e in reasoningVariants(providerId):
+    body["reasoning_effort"] = %e
+
 proc newChatClient(config: AppConfig, providerId: string = ""): HttpClient =
   ## Create a shared HTTP client with auth headers for chat completions.
   result = newHttpClient(userAgent = "drift/1.0", timeout = HttpTimeoutMs)
@@ -458,6 +485,7 @@ type
 
   AgenticResult* = object
     content*: string          ## Assistant text (may be empty when tools are called).
+    reasoning*: string        ## Chain-of-thought (DeepSeek ``reasoning_content``); empty if none.
     toolCalls*: seq[AIToolCall]
     error*: string            ## Non-empty on HTTP/transport/parse failure.
 
@@ -527,6 +555,10 @@ proc assistantTurnJson*(res: AgenticResult): JsonNode =
   ## suitable for appending to the running message array before the tool results.
   result = %*{"role": "assistant", "content": res.content}
   if res.toolCalls.len > 0:
+    # DeepSeek thinking mode rejects (HTTP 400) any tool-call follow-up whose
+    # assistant message omits reasoning_content, so always echo it back on
+    # tool-call turns. Other OpenAI-compatible providers ignore the extra field.
+    result["reasoning_content"] = %res.reasoning
     var arr = newJArray()
     for tc in res.toolCalls:
       arr.add(%*{
@@ -535,6 +567,8 @@ proc assistantTurnJson*(res: AgenticResult): JsonNode =
         "function": {"name": tc.name, "arguments": $tc.arguments}
       })
     result["tool_calls"] = arr
+  elif res.reasoning.len > 0:
+    result["reasoning_content"] = %res.reasoning
 
 proc toAnthropicMessages(messages: JsonNode): tuple[system: string, msgs: JsonNode] =
   ## Convert canonical OpenAI-format messages into the Anthropic Messages shape:
@@ -598,6 +632,8 @@ proc parseOpenAIAgentic(resp: Response): AgenticResult =
     return
   if msg.hasKey("content") and msg["content"].kind == JString:
     result.content = msg["content"].getStr()
+  if msg.hasKey("reasoning_content") and msg["reasoning_content"].kind == JString:
+    result.reasoning = msg["reasoning_content"].getStr()
   if msg.hasKey("tool_calls") and msg["tool_calls"].kind == JArray:
     for tc in msg["tool_calls"]:
       let fn = tc{"function"}
@@ -632,10 +668,14 @@ proc parseAnthropicAgentic(resp: Response): AgenticResult =
   result.content = parts.join("\n")
 
 proc doAgenticChat*(config: AppConfig, providerId, model: string,
-                    messages: JsonNode, planMode: bool): AgenticResult =
+                    messages: JsonNode, planMode: bool,
+                    effort: string = ""): AgenticResult =
   ## One round-trip of the agentic loop: send the conversation (canonical
   ## OpenAI-format ``messages``) plus the tool schemas, and return the assistant
   ## text along with any tool calls it requested. On failure ``error`` is set.
+  ## When ``effort`` is non-empty and the provider supports it (DeepSeek), the
+  ## request opts into thinking mode at that reasoning effort and the reply's
+  ## chain-of-thought is captured in ``result.reasoning``.
   var baseUrl = config.aiBaseUrl
   if baseUrl.len == 0:
     baseUrl = defaultBaseUrl(providerId)
@@ -659,13 +699,16 @@ proc doAgenticChat*(config: AppConfig, providerId, model: string,
     body = $bodyNode
   else:
     url = baseUrl & "/chat/completions"
-    body = $ %*{
+    var bodyNode = %*{
       "model": model,
       "messages": messages,
       "tools": toOpenAITools(defs),
       "tool_choice": "auto",
       "stream": false
     }
+    if effort.len > 0:
+      applyThinking(bodyNode, providerId, effort)
+    body = $bodyNode
 
   try:
     let resp = retryableRequest(client, url, body)

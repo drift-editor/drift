@@ -240,6 +240,19 @@ proc aiSubtitle(config: cfg.AppConfig): string =
     return agent & " — " & model
   return agent
 
+proc refreshThinkingControls(app: App) =
+  ## Show the reasoning-effort variants button only for a thinking-capable
+  ## builtin provider, and keep its label in sync with the configured effort.
+  ## Clamps the effort to the current provider's variant set, since variants are
+  ## provider-specific (e.g. DeepSeek high/max vs OpenAI minimal/low/medium/high).
+  let (providerId, _) = cfg.effectiveBuiltinModel(app.config)
+  let variants = reasoningVariants(providerId)
+  if variants.len > 0 and app.config.aiReasoningEffort notin variants:
+    app.config.aiReasoningEffort = variants[0]
+  app.aiPanel.showVariants =
+    isHttpAgent(app.config.aiAgent) and providerSupportsThinking(providerId)
+  app.aiPanel.reasoningEffort = app.config.aiReasoningEffort
+
 proc restartAiThreadIfRunning(app: App) =
   if app.aiThread != nil:
     app.aiThread.shutdown()
@@ -290,6 +303,7 @@ proc applyAgent(app: App, agentId: string) =
   app.aiPanel.placeholder = "Ask " & agentLabel(agentId) & "..."
   app.aiPanel.subtitle = aiSubtitle(app.config)
   app.aiPanel.showModelControls = isHttpAgent(agentId)
+  app.refreshThinkingControls()
   app.ensureBuiltinApiKey(proc() =
     try:
       app.aiThread = newAIThread(app.config)
@@ -343,6 +357,7 @@ proc selectModelForPreset(app: App, preset, providerId, model: string) =
   if app.config.aiBaseUrl.len == 0:
     app.config.aiBaseUrl = defaultBaseUrl(providerId)
   app.aiPanel.subtitle = aiSubtitle(app.config)
+  app.refreshThinkingControls()
   saveAppConfig(app)
   # Only restart the thread if the changed preset is currently active.
   if isHttpAgent(app.config.aiAgent) and app.config.aiModelPreset.toLowerAscii() == p:
@@ -353,8 +368,23 @@ proc selectPreset(app: App, preset: string) =
   app.config.aiModelPreset = preset
   app.aiPanel.modelPreset = preset
   app.aiPanel.subtitle = aiSubtitle(app.config)
+  app.refreshThinkingControls()
   if isHttpAgent(app.config.aiAgent):
     app.ensureBuiltinApiKey(proc() = app.restartAiThreadIfRunning())
+
+proc setReasoningEffort(app: App, effort: string) =
+  ## Set the thinking-mode reasoning-effort variant and apply it to the running
+  ## session. Consistent with model/preset changes, this restarts the thread so
+  ## subsequent turns use the new effort.
+  app.config.aiReasoningEffort = effort
+  app.aiPanel.reasoningEffort = effort
+  saveAppConfig(app)
+  if isHttpAgent(app.config.aiAgent):
+    app.ensureBuiltinApiKey(proc() = app.restartAiThreadIfRunning())
+
+proc makeSelectEffortAction(app: App, effort: string): proc() =
+  ## Factory to avoid Nim's loop-variable closure capture bug.
+  result = proc() = app.setReasoningEffort(effort)
 
 proc showModelActionMenu(app: App, providerId, model: string)
 
@@ -472,6 +502,15 @@ proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
     app.aiPanel.planMode = not app.aiPanel.planMode
     if app.aiThread != nil:
       app.aiThread.togglePlanMode()
+  app.aiPanel.onVariantsMenu = proc(x, y: int) =
+    # Reasoning-effort variants are provider-specific; build from the active model.
+    let (providerId, _) = cfg.effectiveBuiltinModel(app.config)
+    app.contextMenu.clear()
+    for eff in reasoningVariants(providerId):
+      app.contextMenu.addItem(eff, capitalizeAscii(eff), app.makeSelectEffortAction(eff))
+    app.contextMenu.showAt(x, y, app.width, app.height)
+    discard app.gi.consume()
+  app.refreshThinkingControls()
   return app
 
 proc clearHoverState(app: App; clearPending: bool = true) =

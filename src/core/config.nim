@@ -27,6 +27,7 @@ type
     aiHeavyweightModelProvider*: string
     aiHeavyweightModel*: string
     aiEnabledModels*: seq[string]  # Empty = all enabled; format "providerId/model"
+    aiReasoningEffort*: string  # Thinking-mode effort variant for capable providers: "high" (default) or "max"
 
 proc configDir*(): string =
   getConfigDir() / "drift"
@@ -54,7 +55,8 @@ proc defaultConfig*(): AppConfig =
     aiLightweightModelProvider: "deepseek",
     aiLightweightModel: "deepseek-v4-flash",
     aiHeavyweightModelProvider: "deepseek",
-    aiHeavyweightModel: "deepseek-v4-pro"
+    aiHeavyweightModel: "deepseek-v4-pro",
+    aiReasoningEffort: "high"
   )
 
 proc loadConfig*(): AppConfig =
@@ -116,6 +118,10 @@ proc loadConfig*(): AppConfig =
       for item in j["aiEnabledModels"]:
         if item.kind == JString:
           result.aiEnabledModels.add(item.getStr())
+    if j.hasKey("aiReasoningEffort"):
+      let eff = j["aiReasoningEffort"].getStr().toLowerAscii()
+      if eff == "high" or eff == "max":
+        result.aiReasoningEffort = eff
   except CatchableError:
     discard
 
@@ -161,6 +167,7 @@ proc saveConfig*(config: AppConfig) =
     "aiLightweightModel": config.aiLightweightModel,
     "aiHeavyweightModelProvider": config.aiHeavyweightModelProvider,
     "aiHeavyweightModel": config.aiHeavyweightModel,
-    "aiEnabledModels": config.aiEnabledModels
+    "aiEnabledModels": config.aiEnabledModels,
+    "aiReasoningEffort": config.aiReasoningEffort
   }
   writeFile(configPath(), $j & "\n")

@@ -14,6 +14,7 @@ const
   MessagePadding = 8
   MessageGap = 4
   ModelButtonWidth = 112
+  VariantsButtonWidth = 58
   MaxMessages = 200        ## Cap stored messages to bound memory growth.
   MaxInputLen = 8000       ## Cap input text to prevent pathological input.
   StreamingAnimFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -75,16 +76,20 @@ type
     onAgentMenu*: proc(x, y: int)
     onModelMenu*: proc(x, y: int)
     onPlanModeToggle*: proc()
+    onVariantsMenu*: proc(x, y: int)
     hoverNewChat*: bool
     hoverAgentMenu*: bool
     hoverStop*: bool
     hoverModelMenu*: bool
     hoverPlanMode*: bool
+    hoverVariants*: bool
     hoverInput*: bool
     placeholder*: string
     subtitle*: string
     modelPreset*: string
     showModelControls*: bool
+    showVariants*: bool          ## Show the reasoning-effort variants button (thinking-capable provider only).
+    reasoningEffort*: string     ## Current effort label shown on the variants button ("high"/"max").
     planMode*: bool
     userScrolledUp*: bool
     rightClickedMessageIndex*: int
@@ -110,11 +115,14 @@ proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
     hoverStop: false,
     hoverModelMenu: false,
     hoverPlanMode: false,
+    hoverVariants: false,
     hoverInput: false,
     placeholder: placeholder,
     subtitle: "",
     modelPreset: "lightweight",
     showModelControls: false,
+    showVariants: false,
+    reasoningEffort: "high",
     userScrolledUp: false,
     rightClickedMessageIndex: -1
   )
@@ -485,6 +493,14 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
           panel.onPlanModeToggle()
         return true
 
+      # Variants (reasoning-effort) menu, after the Plan/Build toggle
+      if panel.showVariants:
+        let varX = toggleX + toggleW + 8
+        if rect(varX, toolbarY, VariantsButtonWidth, toggleH).contains(point(e.x, e.y)):
+          if panel.onVariantsMenu != nil:
+            panel.onVariantsMenu(e.x, e.y)
+          return true
+
     let inputContentTop = if panel.showModelControls: inputY + ToolbarHeight else: inputY
     if e.y >= inputContentTop:
       panel.focused = true
@@ -502,6 +518,7 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
     panel.hoverNewChat = rect(iconBtnX, iconBtnY, iconBtnSize, iconBtnSize).contains(point(e.x, e.y))
     panel.hoverAgentMenu = panel.hoverNewChat
     panel.hoverModelMenu = false
+    panel.hoverVariants = false
     panel.hoverInput = false
     if panel.showModelControls:
       let inputY = bounds.y + bounds.h - InputHeight
@@ -513,6 +530,9 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
       let toggleH = ToolbarHeight - 2
       let toggleX = modelBtnBounds.x + modelBtnBounds.w + 8
       panel.hoverPlanMode = rect(toggleX, toolbarY, toggleW, toggleH).contains(point(e.x, e.y))
+      # Variants button hover
+      panel.hoverVariants = panel.showVariants and
+        rect(toggleX + toggleW + 8, toolbarY, VariantsButtonWidth, toggleH).contains(point(e.x, e.y))
       # Input text area starts below the model toolbar
       panel.hoverInput = e.y >= inputY + ToolbarHeight
     else:
@@ -780,6 +800,24 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
     let rightLabelColor = if panel.planMode: textMuted else: color(255, 255, 255, 255)
     discard font.drawText(toggleBounds.x + pad + (halfW - pad * 2 - planLabelW) div 2, labelY, planLabel, leftLabelColor, color(0, 0, 0, 0))
     discard font.drawText(toggleBounds.x + halfW + pad + (halfW - pad * 2 - buildLabelW) div 2, labelY, buildLabel, rightLabelColor, color(0, 0, 0, 0))
+
+    # Variants (reasoning-effort) button, after the Plan/Build toggle. Shown only
+    # for thinking-capable providers; opens a menu to pick the effort variant.
+    if panel.showVariants:
+      let varX = toggleBounds.x + toggleW + 8
+      let varBounds = rect(varX, toolbarY, VariantsButtonWidth, toggleH)
+      let varBg = if panel.hoverVariants: currentTheme.getColor(tcSurfaceHover) else: bg
+      fillRect(varBounds, varBg)
+      let varBorderC = if panel.hoverVariants: accentC else: borderC
+      fillRect(rect(varBounds.x, varBounds.y, varBounds.w, 1), varBorderC)
+      fillRect(rect(varBounds.x, varBounds.y + varBounds.h - 1, varBounds.w, 1), varBorderC)
+      fillRect(rect(varBounds.x, varBounds.y, 1, varBounds.h), varBorderC)
+      fillRect(rect(varBounds.x + varBounds.w - 1, varBounds.y, 1, varBounds.h), varBorderC)
+      let effLabel = capitalizeAscii(if panel.reasoningEffort.len > 0: panel.reasoningEffort else: "high")
+      # Brain glyph prefix hints this is the thinking control.
+      let varText = "◇ " & effLabel
+      let varTextW = font.measureText(varText).w
+      discard font.drawText(varBounds.x + (VariantsButtonWidth - varTextW) div 2, labelY, varText, textMuted, color(0, 0, 0, 0))
 
   let inputBounds = rect(
     bounds.x + MessagePadding,

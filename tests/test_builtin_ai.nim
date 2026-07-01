@@ -46,4 +46,55 @@ assertEq(j3["messages"].len, 1, "makeChatRequest single turn")
 assertEq(ChatRoleUser, "user", "ChatRoleUser constant")
 assertEq(ChatRoleAssistant, "assistant", "ChatRoleAssistant constant")
 
+# --- Thinking-mode support detection (DeepSeek) ---
+assertEq(providerSupportsThinking("deepseek"), true, "deepseek supports thinking")
+assertEq(providerSupportsThinking("DeepSeek"), true, "provider check is case-insensitive")
+assertEq(providerSupportsThinking("openai"), false, "openai has no thinking toggle")
+
+# --- reasoningVariants: provider-specific effort options ---
+assertEq(reasoningVariants("deepseek"), @["high", "max"], "deepseek variants")
+assertEq(reasoningVariants("DeepSeek"), @["high", "max"], "variants are case-insensitive")
+assertEq(reasoningVariants("openai").len, 0, "openai has no variants yet")
+
+# Simple/history request builders never carry thinking (used by classifier/git paths).
+let bodyNoThink = parseJson(makeChatRequestHistory(cfg, "Hi", @[]))
+assertEq(bodyNoThink.hasKey("thinking"), false, "history request has no thinking field")
+
+# --- applyThinking: always enables thinking + sets reasoning_effort for DeepSeek ---
+var dsBody = %*{"model": "deepseek-v4-pro", "messages": []}
+applyThinking(dsBody, "deepseek", "high")
+assertEq(dsBody["thinking"]["type"].getStr(), "enabled", "thinking enabled for deepseek")
+assertEq(dsBody["reasoning_effort"].getStr(), "high", "reasoning_effort=high injected")
+
+var dsBodyMax = %*{"model": "deepseek-v4-pro", "messages": []}
+applyThinking(dsBodyMax, "deepseek", "max")
+assertEq(dsBodyMax["reasoning_effort"].getStr(), "max", "reasoning_effort=max injected")
+
+# Unknown effort is ignored (thinking still enabled, no reasoning_effort key).
+var dsBodyBad = %*{"model": "deepseek-v4-pro", "messages": []}
+applyThinking(dsBodyBad, "deepseek", "bogus")
+assertEq(dsBodyBad["thinking"]["type"].getStr(), "enabled", "thinking enabled even with bad effort")
+assertEq(dsBodyBad.hasKey("reasoning_effort"), false, "invalid effort not written")
+
+# Non-DeepSeek provider: applyThinking is a no-op (toggle is provider-scoped).
+var oaBody = %*{"model": "gpt-5.5", "messages": []}
+applyThinking(oaBody, "openai", "high")
+assertEq(oaBody.hasKey("thinking"), false, "no thinking field for openai")
+assertEq(oaBody.hasKey("reasoning_effort"), false, "no reasoning_effort for openai")
+
+# --- config: reasoning effort default + persistence ---
+assertEq(defaultConfig().aiReasoningEffort, "high", "default reasoning effort is high")
+
+# --- assistantTurnJson echoes reasoning_content back on tool-call turns ---
+let turnWithTool = assistantTurnJson(AgenticResult(
+  content: "",
+  reasoning: "let me think",
+  toolCalls: @[AIToolCall(id: "c1", name: "read_file", arguments: %*{"path": "a.nim"})]))
+assertEq(turnWithTool.hasKey("reasoning_content"), true, "tool turn carries reasoning_content")
+assertEq(turnWithTool["reasoning_content"].getStr(), "let me think", "reasoning_content value")
+
+# A plain assistant turn with no reasoning has no reasoning_content field.
+let turnPlain = assistantTurnJson(AgenticResult(content: "done"))
+assertEq(turnPlain.hasKey("reasoning_content"), false, "plain turn omits reasoning_content")
+
 echo "All built-in AI tests passed!"
