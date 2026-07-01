@@ -466,6 +466,10 @@ proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
     discard app.gi.consume()
   app.aiPanel.onModelMenu = proc(x, y: int) =
     app.showUnifiedModelDialog()
+  app.aiPanel.onPlanModeToggle = proc() =
+    app.aiPanel.planMode = not app.aiPanel.planMode
+    if app.aiThread != nil:
+      app.aiThread.togglePlanMode()
   return app
 
 proc clearHoverState(app: App; clearPending: bool = true) =

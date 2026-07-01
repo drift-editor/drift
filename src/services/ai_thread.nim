@@ -25,6 +25,7 @@ type
     amkClearSession
     amkShutdown
     amkCancel
+    amkTogglePlanMode
 
   AIMessage* = object
     kind*: AIMessageKind
@@ -40,9 +41,36 @@ type
     config*: AppConfig
     shuttingDown*: Atomic[bool]
     history: seq[ChatTurn]   ## Multi-turn conversation memory (built-in HTTP agent)
+    planMode*: bool          ## Plan mode: generate plan before executing
 
 const
   MaxHistoryTurns* = 20   ## Cap conversation history to bound memory growth.
+
+  PlanModePrompt* = """
+Plan mode is active. You MUST NOT make any edits or execute any changes yet.
+
+Your task is to create a detailed implementation plan. Follow this structure:
+
+### Phase 1: Initial Understanding
+- Read and understand the relevant code
+- Ask clarifying questions if needed
+- Identify files that need to be modified
+
+### Phase 2: Design
+- Describe the implementation approach
+- List all files to be modified or created
+- Identify dependencies and edge cases
+
+### Phase 3: Final Plan
+Write your plan as a markdown checklist:
+- [ ] Step 1: Description
+- [ ] Step 2: Description
+- ...
+
+Include file paths and specific code references. Be concise but actionable.
+
+After writing the plan, tell the user: "Plan ready. Switch to Build mode to execute."
+"""
 
 proc sendResponse(t: AIThread, msg: AIMessage) {.inline.} =
   if t.respChan.isClosed or t.shuttingDown.load(moAcquire):
@@ -777,6 +805,9 @@ proc runBuiltinAI(t: AIThread) {.thread.} =
           let gitContext = buildGitContextPrompt(t.workspaceRoot, req.text)
           if gitContext.len > 0:
             promptText = gitContext
+        # Prepend plan mode instructions when active.
+        if t.planMode:
+          promptText = PlanModePrompt & "\n\n## User Request\n\n" & promptText
         # Send the prompt with multi-turn conversation history for context memory.
         let answer = doChatCompletionHistory(t.config, promptText, t.history)
         if answer.startsWith("HTTP error") or answer.startsWith("Request failed") or answer.startsWith("Unexpected response"):
@@ -804,6 +835,8 @@ proc runBuiltinAI(t: AIThread) {.thread.} =
     of amkNewSession, amkClearSession:
       # Start a fresh conversation: clear multi-turn history.
       t.history.setLen(0)
+    of amkTogglePlanMode:
+      t.planMode = not t.planMode
     of amkShutdown:
       break
     of amkCancel:
@@ -970,6 +1003,9 @@ proc clearSession*(t: AIThread) =
 
 proc cancel*(t: AIThread) =
   sendOrWarn(t.reqChan, AIMessage(kind: amkCancel), "cancel")
+
+proc togglePlanMode*(t: AIThread) =
+  sendOrWarn(t.reqChan, AIMessage(kind: amkTogglePlanMode), "togglePlanMode")
 
 proc shutdown*(t: AIThread) =
   if t.shuttingDown.exchange(true, moAcquire):

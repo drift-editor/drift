@@ -74,15 +74,18 @@ type
     onStop*: proc()
     onAgentMenu*: proc(x, y: int)
     onModelMenu*: proc(x, y: int)
+    onPlanModeToggle*: proc()
     hoverNewChat*: bool
     hoverAgentMenu*: bool
     hoverStop*: bool
     hoverModelMenu*: bool
+    hoverPlanMode*: bool
     hoverInput*: bool
     placeholder*: string
     subtitle*: string
     modelPreset*: string
     showModelControls*: bool
+    planMode*: bool
     userScrolledUp*: bool
     rightClickedMessageIndex*: int
 
@@ -101,10 +104,12 @@ proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
     onStop: nil,
     onAgentMenu: nil,
     onModelMenu: nil,
+    onPlanModeToggle: nil,
     hoverNewChat: false,
     hoverAgentMenu: false,
     hoverStop: false,
     hoverModelMenu: false,
+    hoverPlanMode: false,
     hoverInput: false,
     placeholder: placeholder,
     subtitle: "",
@@ -430,6 +435,15 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
           panel.onModelMenu(e.x, e.y)
         return true
 
+      # Plan/Build toggle (next to model selector)
+      let toggleW = 72
+      let toggleH = ToolbarHeight - 2
+      let toggleX = modelBtnBounds.x + modelBtnBounds.w + 8
+      if rect(toggleX, toolbarY, toggleW, toggleH).contains(point(e.x, e.y)):
+        if panel.onPlanModeToggle != nil:
+          panel.onPlanModeToggle()
+        return true
+
     let inputContentTop = if panel.showModelControls: inputY + ToolbarHeight else: inputY
     if e.y >= inputContentTop:
       panel.focused = true
@@ -453,6 +467,11 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
       let toolbarY = inputY + 4
       let modelBtnBounds = rect(bounds.x + MessagePadding, toolbarY, ModelButtonWidth, ToolbarHeight - 2)
       panel.hoverModelMenu = modelBtnBounds.contains(point(e.x, e.y))
+      # Plan/Build toggle hover
+      let toggleW = 72
+      let toggleH = ToolbarHeight - 2
+      let toggleX = modelBtnBounds.x + modelBtnBounds.w + 8
+      panel.hoverPlanMode = rect(toggleX, toolbarY, toggleW, toggleH).contains(point(e.x, e.y))
       # Input text area starts below the model toolbar
       panel.hoverInput = e.y >= inputY + ToolbarHeight
     else:
@@ -690,6 +709,36 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
 
     # Chevron-down icon (the dropdown arrow)
     drawIconCentered(iiChevronDown, rect(sepX + 2, modelBtnBounds.y, 18, modelBtnBounds.h))
+
+    # Plan/Build toggle button (next to model selector)
+    let toggleW = 72
+    let toggleH = ToolbarHeight - 2
+    let toggleX = modelBtnBounds.x + modelBtnBounds.w + 8
+    let toggleBounds = rect(toggleX, toolbarY, toggleW, toggleH)
+    let toggleBg = if panel.hoverPlanMode: currentTheme.getColor(tcSurfaceHover) else: bg
+    fillRect(toggleBounds, toggleBg)
+    let toggleBorderC = if panel.hoverPlanMode: accentC else: borderC
+    fillRect(rect(toggleBounds.x, toggleBounds.y, toggleBounds.w, 1), toggleBorderC)
+    fillRect(rect(toggleBounds.x, toggleBounds.y + toggleBounds.h - 1, toggleBounds.w, 1), toggleBorderC)
+    fillRect(rect(toggleBounds.x, toggleBounds.y, 1, toggleBounds.h), toggleBorderC)
+    fillRect(rect(toggleBounds.x + toggleBounds.w - 1, toggleBounds.y, 1, toggleBounds.h), toggleBorderC)
+    # Active side highlight
+    let halfW = toggleW div 2
+    if panel.planMode:
+      fillRect(rect(toggleBounds.x, toggleBounds.y, halfW, toggleBounds.h), accentC)
+    else:
+      fillRect(rect(toggleBounds.x + halfW, toggleBounds.y, toggleW - halfW, toggleBounds.h), accentC)
+    # Labels with horizontal padding
+    let pad = 4
+    let labelY = toggleBounds.y + (toggleBounds.h - fm.lineHeight) div 2
+    let planLabel = "Plan"
+    let buildLabel = "Build"
+    let planLabelW = font.measureText(planLabel).w
+    let buildLabelW = font.measureText(buildLabel).w
+    let leftLabelColor = if panel.planMode: color(255, 255, 255, 255) else: textMuted
+    let rightLabelColor = if panel.planMode: textMuted else: color(255, 255, 255, 255)
+    discard font.drawText(toggleBounds.x + pad + (halfW - pad * 2 - planLabelW) div 2, labelY, planLabel, leftLabelColor, color(0, 0, 0, 0))
+    discard font.drawText(toggleBounds.x + halfW + pad + (halfW - pad * 2 - buildLabelW) div 2, labelY, buildLabel, rightLabelColor, color(0, 0, 0, 0))
 
   let inputBounds = rect(
     bounds.x + MessagePadding,
