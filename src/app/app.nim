@@ -2287,6 +2287,7 @@ proc run*(app: App) =
 
     # Title bar background
     fillRect(rect(0, 0, app.width, TopBarHeight), currentTheme.getColor(tcBackground))
+    fillRect(rect(0, TopBarHeight - 1, app.width, 1), currentTheme.getColor(tcBorder))
 
     # Title bar buttons
     renderTitleBarButtons(app)
