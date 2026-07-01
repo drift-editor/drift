@@ -473,6 +473,11 @@ proc builtinToolDefs(planMode: bool): seq[tuple[name, description: string, param
       %*{"type": "object",
          "properties": {"path": {"type": "string", "description": "Directory path relative to the workspace root."}},
          "required": ["path"]}),
+    ("git_status", "Show the current git branch and the list of locally changed files (staged, unstaged, untracked). Use this when the user asks to review, summarize, or look at their changes.",
+      %*{"type": "object", "properties": {}}),
+    ("git_diff", "Show the git diff of local changes. Pass a file path for that file's diff, or omit it for the full working-tree diff.",
+      %*{"type": "object",
+         "properties": {"path": {"type": "string", "description": "Optional file path relative to the workspace root. Omit for the whole working tree."}}}),
   ]
   if planMode:
     return

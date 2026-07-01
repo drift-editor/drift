@@ -46,7 +46,7 @@ type
 
 const
   MaxHistoryTurns* = 20   ## Cap conversation history to bound memory growth.
-  MaxAgenticIterations* = 8  ## Max tool-call rounds per built-in agent turn.
+  MaxAgenticIterations* = 100  ## Max tool-call rounds per built-in agent turn.
 
   PlanModePrompt* = """
 Plan mode is active. You MUST NOT make any edits or execute any changes yet.
@@ -783,6 +783,9 @@ proc summarizeToolCall(name: string, args: JsonNode): string =
   of "list_directory": "Listing " & path
   of "write_file": "Writing " & path
   of "edit_file": "Editing " & path
+  of "git_status": "Checking git status"
+  of "git_diff":
+    if path.len > 0: "Diffing " & path else: "Reading git diff"
   else:
     if path.len > 0: name & " " & path else: name
 
@@ -875,6 +878,46 @@ proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode): tuple[conten
     except CatchableError as e:
       return ("Error editing file: " & e.msg, @[])
 
+  of "git_status":
+    let repoRoot = gitcmd.getRepoRoot(t.workspaceRoot)
+    if repoRoot.len == 0:
+      return ("Error: this workspace is not a git repository.", @[])
+    let branch = gitcmd.getCurrentBranch(repoRoot)
+    var lines: seq[string]
+    for f in gitcmd.parseGitStatus(repoRoot):
+      var parts: seq[string]
+      if f.stagedStatus != gfsUnmodified: parts.add("staged")
+      if f.workingStatus != gfsUnmodified:
+        if f.workingStatus == gfsUntracked: parts.add("new")
+        else: parts.add("unstaged")
+      if parts.len > 0:
+        lines.add("- " & f.path & " (" & parts.join(", ") & ")")
+    var outp = "Branch: " & branch & "\n"
+    if lines.len == 0: outp.add("No local changes.")
+    else: outp.add("Changed files:\n" & lines.join("\n"))
+    return (outp, @[])
+
+  of "git_diff":
+    let repoRoot = gitcmd.getRepoRoot(t.workspaceRoot)
+    if repoRoot.len == 0:
+      return ("Error: this workspace is not a git repository.", @[])
+    var diff: string
+    if path.len > 0:
+      let absPath = resolveWorkspacePath(path, t.workspaceRoot)
+      let relPath = relativePath(absPath, repoRoot)
+      let staged = gitcmd.getFileDiff(repoRoot, relPath, staged = true)
+      let unstaged = gitcmd.getFileDiff(repoRoot, relPath, staged = false)
+      diff = staged
+      if staged.len > 0 and unstaged.len > 0: diff.add("\n")
+      diff.add(unstaged)
+    else:
+      diff = gitcmd.getAllLocalDiff(repoRoot)
+    if diff.strip().len == 0:
+      return ("(no local changes)", @[])
+    if diff.len > MaxToolResultChars:
+      diff = diff[0..<MaxToolResultChars] & "\n... (diff truncated)"
+    return (diff, @[])
+
   else:
     return ("Error: unknown tool '" & name & "'.", @[])
 
@@ -887,13 +930,15 @@ proc runBuiltinAgentic(t: AIThread, userText: string) =
   var systemPrompt =
     "You are the AI assistant embedded in the Drift code editor. You operate " &
     "directly inside the user's workspace at " & t.workspaceRoot & ".\n\n" &
-    "You can read, list, create and edit files using the provided tools. When " &
-    "the user asks for a change, MAKE the change yourself by calling the tools " &
-    "— do not merely describe what to do or print code for the user to paste. " &
-    "Always read a file before editing it so your edits match exactly. Use " &
-    "edit_file for targeted changes and write_file for new files or full " &
-    "rewrites. Keep changes minimal and focused. When finished, briefly " &
-    "summarize what you changed."
+    "You can read, list, create and edit files using the provided tools, and " &
+    "inspect local version-control changes with git_status and git_diff. When " &
+    "the user asks to review, summarize, or look at their changes, call " &
+    "git_status and git_diff to see the actual diff before answering. When the " &
+    "user asks for a change, MAKE the change yourself by calling the tools — do " &
+    "not merely describe what to do or print code for the user to paste. Always " &
+    "read a file before editing it so your edits match exactly. Use edit_file " &
+    "for targeted changes and write_file for new files or full rewrites. Keep " &
+    "changes minimal and focused. When finished, briefly summarize what you did."
   if t.planMode:
     systemPrompt = PlanModePrompt &
       "\n\n(You may use the read-only tools to inspect the code while planning. " &
