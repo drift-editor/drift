@@ -10,6 +10,7 @@ else:
 import ../channel_spsc
 import ../core/config
 import builtin_ai
+import prompt_complexity
 import git as gitcmd
 
 type
@@ -45,6 +46,7 @@ type
 
 const
   MaxHistoryTurns* = 20   ## Cap conversation history to bound memory growth.
+  MaxAgenticIterations* = 8  ## Max tool-call rounds per built-in agent turn.
 
   PlanModePrompt* = """
 Plan mode is active. You MUST NOT make any edits or execute any changes yet.
@@ -762,6 +764,187 @@ proc executeFileOp*(t: AIThread, intent: FileOpIntent): tuple[ok: bool, msg: str
   of fokNone:
     discard
 
+# ---------------------------------------------------------------------------
+#  Agentic tool loop (built-in HTTP agent)
+# ---------------------------------------------------------------------------
+# Unlike the deterministic file-op shortcut above, this path gives the LLM real
+# function-calling: it can read/list/write/edit files through workspace-sandboxed
+# tools and iterate until it produces a final answer. All file access reuses the
+# same containment checks (`resolveWorkspacePath` / `isPathInsideWorkspace`) and
+# size cap (`MaxFileWriteSize`) as the ACP agent handlers.
+
+const MaxToolResultChars = 60_000  ## Cap tool output fed back to the model.
+
+proc summarizeToolCall(name: string, args: JsonNode): string =
+  ## Short human-readable label shown in the thinking area for a tool call.
+  let path = args{"path"}.getStr()
+  case name
+  of "read_file": "Reading " & path
+  of "list_directory": "Listing " & path
+  of "write_file": "Writing " & path
+  of "edit_file": "Editing " & path
+  else:
+    if path.len > 0: name & " " & path else: name
+
+proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode): tuple[content: string, changed: seq[string]] =
+  ## Execute one built-in tool call inside the workspace sandbox. Returns the
+  ## textual result to feed back to the model plus any changed file paths.
+  result = ("", @[])
+  let path = args{"path"}.getStr()
+  case name
+  of "read_file":
+    if path.len == 0: return ("Error: 'path' is required.", @[])
+    let absPath = resolveWorkspacePath(path, t.workspaceRoot)
+    if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+      return ("Error: path is outside the workspace.", @[])
+    if not fileExists(absPath):
+      return ("Error: file not found: " & path, @[])
+    try:
+      var content = readFile(absPath)
+      if content.len > MaxToolResultChars:
+        content = content[0..<MaxToolResultChars] &
+          "\n... (truncated; file is " & $content.len & " bytes)"
+      return (content, @[])
+    except CatchableError as e:
+      return ("Error reading file: " & e.msg, @[])
+
+  of "list_directory":
+    if path.len == 0: return ("Error: 'path' is required.", @[])
+    let absPath = resolveWorkspacePath(path, t.workspaceRoot)
+    if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+      return ("Error: path is outside the workspace.", @[])
+    if not dirExists(absPath):
+      return ("Error: directory not found: " & path, @[])
+    try:
+      var lines: seq[string]
+      for kind, entryPath in walkDir(absPath):
+        let nm = extractFilename(entryPath)
+        case kind
+        of pcDir, pcLinkToDir: lines.add(nm & "/")
+        else: lines.add(nm)
+      if lines.len == 0: return ("(empty directory)", @[])
+      return (lines.join("\n"), @[])
+    except CatchableError as e:
+      return ("Error listing directory: " & e.msg, @[])
+
+  of "write_file":
+    if path.len == 0: return ("Error: 'path' is required.", @[])
+    let content = args{"content"}.getStr()
+    if content.len > MaxFileWriteSize:
+      return ("Error: content too large (max " & $MaxFileWriteSize & " bytes).", @[])
+    let absPath = resolveWorkspacePath(path, t.workspaceRoot)
+    if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+      return ("Error: path is outside the workspace.", @[])
+    try:
+      let parent = absPath.parentDir()
+      if parent.len > 0 and not dirExists(parent): createDir(parent)
+      writeFile(absPath, content)
+      return ("Wrote " & $content.len & " bytes to " & path, @[absPath])
+    except CatchableError as e:
+      return ("Error writing file: " & e.msg, @[])
+
+  of "edit_file":
+    if path.len == 0: return ("Error: 'path' is required.", @[])
+    let oldStr = args{"old_string"}.getStr()
+    let newStr = args{"new_string"}.getStr()
+    let replaceAll = args{"replace_all"}.getBool(false)
+    if oldStr.len == 0:
+      return ("Error: 'old_string' must not be empty.", @[])
+    let absPath = resolveWorkspacePath(path, t.workspaceRoot)
+    if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+      return ("Error: path is outside the workspace.", @[])
+    if not fileExists(absPath):
+      return ("Error: file not found: " & path, @[])
+    try:
+      let original = readFile(absPath)
+      let occurrences = original.count(oldStr)
+      if occurrences == 0:
+        return ("Error: old_string not found in " & path &
+          ". Read the file and match the text exactly.", @[])
+      if occurrences > 1 and not replaceAll:
+        return ("Error: old_string is not unique (" & $occurrences & " matches) in " &
+          path & ". Add surrounding context or set replace_all=true.", @[])
+      # Non-replace_all path has exactly one match here, so replace() is safe.
+      let updated = original.replace(oldStr, newStr)
+      if updated.len > MaxFileWriteSize:
+        return ("Error: resulting file too large (max " & $MaxFileWriteSize & " bytes).", @[])
+      writeFile(absPath, updated)
+      let cnt = if replaceAll: occurrences else: 1
+      return ("Edited " & path & " (" & $cnt & " replacement" &
+        (if cnt == 1: "" else: "s") & ")", @[absPath])
+    except CatchableError as e:
+      return ("Error editing file: " & e.msg, @[])
+
+  else:
+    return ("Error: unknown tool '" & name & "'.", @[])
+
+proc runBuiltinAgentic(t: AIThread, userText: string) =
+  ## Agentic tool loop: the model can call read/list/write/edit tools to inspect
+  ## and modify workspace files directly, iterating until it returns a final
+  ## text answer. Only the final answer is persisted to conversation history.
+  let (provider, model) = resolveBuiltinModel(t.config, userText)
+
+  var systemPrompt =
+    "You are the AI assistant embedded in the Drift code editor. You operate " &
+    "directly inside the user's workspace at " & t.workspaceRoot & ".\n\n" &
+    "You can read, list, create and edit files using the provided tools. When " &
+    "the user asks for a change, MAKE the change yourself by calling the tools " &
+    "— do not merely describe what to do or print code for the user to paste. " &
+    "Always read a file before editing it so your edits match exactly. Use " &
+    "edit_file for targeted changes and write_file for new files or full " &
+    "rewrites. Keep changes minimal and focused. When finished, briefly " &
+    "summarize what you changed."
+  if t.planMode:
+    systemPrompt = PlanModePrompt &
+      "\n\n(You may use the read-only tools to inspect the code while planning. " &
+      "Do not attempt to modify files.)"
+  let projectContext = loadProjectContext(t.workspaceRoot)
+  if projectContext.len > 0:
+    systemPrompt.add("\n\n" & projectContext)
+
+  # Canonical (OpenAI-format) message array driven through the loop.
+  var messages = newJArray()
+  messages.add(%*{"role": "system", "content": systemPrompt})
+  for turn in t.history:
+    messages.add(%*{"role": turn.role, "content": turn.content})
+  messages.add(%*{"role": "user", "content": userText})
+
+  var finalText = ""
+  var errored = false
+  var iterations = 0
+  while iterations < MaxAgenticIterations:
+    inc iterations
+    let res = doAgenticChat(t.config, provider, model, messages, t.planMode)
+    if res.error.len > 0:
+      t.sendResponse(AIMessage(kind: amkError, error: res.error))
+      errored = true
+      break
+    if res.toolCalls.len == 0:
+      finalText = res.content
+      break
+    # Surface any interim reasoning text as thinking, then run the tools.
+    if res.content.strip().len > 0:
+      t.sendResponse(AIMessage(kind: amkThinking, text: res.content))
+    messages.add(assistantTurnJson(res))
+    for tc in res.toolCalls:
+      t.sendResponse(AIMessage(kind: amkThinking, text: summarizeToolCall(tc.name, tc.arguments)))
+      let (toolContent, changed) = executeBuiltinTool(t, tc.name, tc.arguments)
+      for cp in changed:
+        t.sendResponse(AIMessage(kind: amkFileChanged, text: cp))
+      messages.add(%*{"role": "tool", "tool_call_id": tc.id, "content": toolContent})
+
+  if errored:
+    return
+  if finalText.len == 0:
+    finalText = "Reached the tool-call limit (" & $MaxAgenticIterations &
+      ") without a final answer."
+  t.sendResponse(AIMessage(kind: amkResponseChunk, text: finalText))
+  t.sendResponse(AIMessage(kind: amkResponseDone))
+  t.history.add((role: ChatRoleUser, content: userText))
+  t.history.add((role: ChatRoleAssistant, content: finalText))
+  while t.history.len > MaxHistoryTurns * 2:
+    t.history.delete(0)
+
 proc runBuiltinAI(t: AIThread) {.thread.} =
   ## Worker path for the built-in HTTP agent.
   t.isReady.store(true, moRelease)
@@ -793,45 +976,41 @@ proc runBuiltinAI(t: AIThread) {.thread.} =
         while t.history.len > MaxHistoryTurns * 2:
           t.history.delete(0)
       else:
-        var promptText = req.text
-        # Load project context (AGENTS.md or CLAUDE.md) for coding conventions.
-        let projectContext = loadProjectContext(t.workspaceRoot)
-        if projectContext.len > 0:
-          promptText = projectContext & "## User Request\n\n" & promptText
-        # Use the lightweight model to detect git-related intent ONCE, then attach
-        # local status + diff so the main model can answer without tool access.
+        # Detect git-related intent once. If the user is asking about local
+        # changes, attach status + diff and treat the reply specially (commit
+        # message / diff-grounded answer). This flow does not use tools.
         let isGitIntent = classifyGitIntent(t.config, req.text)
+        var gitContext = ""
         if isGitIntent:
-          let gitContext = buildGitContextPrompt(t.workspaceRoot, req.text)
-          if gitContext.len > 0:
-            promptText = gitContext
-        # Prepend plan mode instructions when active.
-        if t.planMode:
-          promptText = PlanModePrompt & "\n\n## User Request\n\n" & promptText
-        # Send the prompt with multi-turn conversation history for context memory.
-        let answer = doChatCompletionHistory(t.config, promptText, t.history)
-        if answer.startsWith("HTTP error") or answer.startsWith("Request failed") or answer.startsWith("Unexpected response"):
-          t.sendResponse(AIMessage(kind: amkError, error: answer))
-        else:
-          # Record this turn into history (user prompt + assistant reply).
-          t.history.add((role: ChatRoleUser, content: req.text))
-          t.history.add((role: ChatRoleAssistant, content: answer))
-          # Prune oldest turns to bound memory growth.
-          while t.history.len > MaxHistoryTurns * 2:
-            t.history.delete(0)
-          # Agent-like execution: if the user asked to commit local changes and we
-          # attached git context, treat the model output as the commit message,
-          # stage all changes, commit, and report the result.
-          var finalText = answer
-          if promptText != req.text and isGitIntent:
+          gitContext = buildGitContextPrompt(t.workspaceRoot, req.text)
+
+        if isGitIntent and gitContext.len > 0:
+          var promptText = gitContext
+          if t.planMode:
+            promptText = PlanModePrompt & "\n\n## User Request\n\n" & promptText
+          let answer = doChatCompletionHistory(t.config, promptText, t.history)
+          if answer.startsWith("HTTP error") or answer.startsWith("Request failed") or answer.startsWith("Unexpected response"):
+            t.sendResponse(AIMessage(kind: amkError, error: answer))
+          else:
+            t.history.add((role: ChatRoleUser, content: req.text))
+            t.history.add((role: ChatRoleAssistant, content: answer))
+            while t.history.len > MaxHistoryTurns * 2:
+              t.history.delete(0)
+            # Agent-like execution: treat the model output as the commit message,
+            # stage all changes, commit, and report the result.
+            var finalText = answer
             let message = answer.strip()
             if message.len > 0:
               if gitcmd.stageAllChanges(t.workspaceRoot) and gitcmd.commitChanges(t.workspaceRoot, message):
                 finalText = "Committed with message:\n\n" & message
               else:
                 finalText = "Generated commit message:\n\n" & message & "\n\n(commit failed)"
-          t.sendResponse(AIMessage(kind: amkResponseChunk, text: finalText))
-          t.sendResponse(AIMessage(kind: amkResponseDone))
+            t.sendResponse(AIMessage(kind: amkResponseChunk, text: finalText))
+            t.sendResponse(AIMessage(kind: amkResponseDone))
+        else:
+          # General request: run the agentic tool loop so the model can read and
+          # modify workspace files directly instead of only advising.
+          runBuiltinAgentic(t, req.text)
     of amkNewSession, amkClearSession:
       # Start a fresh conversation: clear multi-turn history.
       t.history.setLen(0)

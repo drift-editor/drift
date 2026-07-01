@@ -439,3 +439,228 @@ proc doChatCompletionHistory*(config: AppConfig, prompt: string,
     return "Request failed: " & e.msg
   finally:
     client.close()
+
+# ---------------------------------------------------------------------------
+#  Tool-calling (function-calling) support for the built-in HTTP agent
+# ---------------------------------------------------------------------------
+# Lets the built-in agent actually read and modify workspace files instead of
+# only returning instructions. Supports both OpenAI-compatible
+# /chat/completions function-calling and the Anthropic Messages tool-use API.
+# The caller (ai_thread.nim) drives the agentic loop: send the conversation +
+# tool schemas, execute any requested tool calls, feed the results back, and
+# repeat until the model returns a final text answer.
+
+type
+  AIToolCall* = object
+    id*: string          ## Provider-assigned call id, echoed back with the result.
+    name*: string        ## Tool/function name.
+    arguments*: JsonNode ## Parsed arguments object (never nil; {} when absent).
+
+  AgenticResult* = object
+    content*: string          ## Assistant text (may be empty when tools are called).
+    toolCalls*: seq[AIToolCall]
+    error*: string            ## Non-empty on HTTP/transport/parse failure.
+
+proc builtinToolDefs(planMode: bool): seq[tuple[name, description: string, parameters: JsonNode]] =
+  ## Neutral tool definitions. In plan mode only the read-only tools are offered
+  ## so the model can inspect the code while planning but cannot mutate files.
+  result = @[
+    ("read_file", "Read and return the full contents of a text file in the workspace.",
+      %*{"type": "object",
+         "properties": {"path": {"type": "string", "description": "File path relative to the workspace root (or absolute inside it)."}},
+         "required": ["path"]}),
+    ("list_directory", "List the files and subdirectories of a directory in the workspace.",
+      %*{"type": "object",
+         "properties": {"path": {"type": "string", "description": "Directory path relative to the workspace root."}},
+         "required": ["path"]}),
+  ]
+  if planMode:
+    return
+  result.add(("write_file",
+    "Create a new file or completely overwrite an existing file with the given content.",
+    %*{"type": "object",
+       "properties": {
+         "path": {"type": "string", "description": "File path relative to the workspace root."},
+         "content": {"type": "string", "description": "Full file content to write."}},
+       "required": ["path", "content"]}))
+  result.add(("edit_file",
+    "Replace an exact substring in an existing file. Read the file first so old_string matches exactly (including whitespace and indentation). old_string must be unique in the file unless replace_all is true.",
+    %*{"type": "object",
+       "properties": {
+         "path": {"type": "string", "description": "File path relative to the workspace root."},
+         "old_string": {"type": "string", "description": "Exact text to find and replace."},
+         "new_string": {"type": "string", "description": "Replacement text."},
+         "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring a unique match. Default false."}},
+       "required": ["path", "old_string", "new_string"]}))
+
+proc toOpenAITools(defs: seq[tuple[name, description: string, parameters: JsonNode]]): JsonNode =
+  result = newJArray()
+  for d in defs:
+    result.add(%*{
+      "type": "function",
+      "function": {"name": d.name, "description": d.description, "parameters": d.parameters}
+    })
+
+proc toAnthropicTools(defs: seq[tuple[name, description: string, parameters: JsonNode]]): JsonNode =
+  result = newJArray()
+  for d in defs:
+    result.add(%*{"name": d.name, "description": d.description, "input_schema": d.parameters})
+
+proc assistantTurnJson*(res: AgenticResult): JsonNode =
+  ## Build a canonical (OpenAI-format) assistant message from an AgenticResult,
+  ## suitable for appending to the running message array before the tool results.
+  result = %*{"role": "assistant", "content": res.content}
+  if res.toolCalls.len > 0:
+    var arr = newJArray()
+    for tc in res.toolCalls:
+      arr.add(%*{
+        "id": tc.id,
+        "type": "function",
+        "function": {"name": tc.name, "arguments": $tc.arguments}
+      })
+    result["tool_calls"] = arr
+
+proc toAnthropicMessages(messages: JsonNode): tuple[system: string, msgs: JsonNode] =
+  ## Convert canonical OpenAI-format messages into the Anthropic Messages shape:
+  ## system messages are hoisted into the top-level system string, assistant
+  ## tool_calls become tool_use content blocks, and consecutive tool results are
+  ## merged into a single user turn of tool_result blocks.
+  var sys = ""
+  var arr = newJArray()
+  var i = 0
+  let n = messages.len
+  while i < n:
+    let m = messages[i]
+    let role = m{"role"}.getStr()
+    case role
+    of "system":
+      if sys.len > 0: sys.add("\n\n")
+      sys.add(m{"content"}.getStr())
+      inc i
+    of "user":
+      arr.add(%*{"role": "user", "content": m{"content"}.getStr()})
+      inc i
+    of "assistant":
+      var blocks = newJArray()
+      let c = m{"content"}
+      if c != nil and c.kind == JString and c.getStr().len > 0:
+        blocks.add(%*{"type": "text", "text": c.getStr()})
+      if m.hasKey("tool_calls") and m["tool_calls"].kind == JArray:
+        for tc in m["tool_calls"]:
+          let fn = tc{"function"}
+          if fn == nil: continue
+          var input: JsonNode = newJObject()
+          let argStr = fn{"arguments"}.getStr("")
+          if argStr.len > 0:
+            try: input = parseJson(argStr)
+            except CatchableError: input = newJObject()
+          blocks.add(%*{"type": "tool_use", "id": tc{"id"}.getStr(),
+                        "name": fn{"name"}.getStr(), "input": input})
+      arr.add(%*{"role": "assistant", "content": blocks})
+      inc i
+    of "tool":
+      var results = newJArray()
+      while i < n and messages[i]{"role"}.getStr() == "tool":
+        let tm = messages[i]
+        results.add(%*{"type": "tool_result",
+                       "tool_use_id": tm{"tool_call_id"}.getStr(),
+                       "content": tm{"content"}.getStr()})
+        inc i
+      arr.add(%*{"role": "user", "content": results})
+    else:
+      inc i
+  result = (sys, arr)
+
+proc parseOpenAIAgentic(resp: Response): AgenticResult =
+  let j = parseJson(resp.body)
+  if not (j.hasKey("choices") and j["choices"].kind == JArray and j["choices"].len > 0):
+    result.error = "Unexpected response: " & resp.body
+    return
+  let msg = j["choices"][0]{"message"}
+  if msg == nil:
+    result.error = "Unexpected response: " & resp.body
+    return
+  if msg.hasKey("content") and msg["content"].kind == JString:
+    result.content = msg["content"].getStr()
+  if msg.hasKey("tool_calls") and msg["tool_calls"].kind == JArray:
+    for tc in msg["tool_calls"]:
+      let fn = tc{"function"}
+      if fn == nil: continue
+      var argNode: JsonNode = newJObject()
+      let argStr = fn{"arguments"}.getStr("")
+      if argStr.len > 0:
+        try: argNode = parseJson(argStr)
+        except CatchableError: argNode = newJObject()
+      result.toolCalls.add(AIToolCall(
+        id: tc{"id"}.getStr(),
+        name: fn{"name"}.getStr(),
+        arguments: argNode))
+
+proc parseAnthropicAgentic(resp: Response): AgenticResult =
+  let j = parseJson(resp.body)
+  if not (j.hasKey("content") and j["content"].kind == JArray):
+    result.error = "Unexpected response: " & resp.body
+    return
+  var parts: seq[string]
+  for blk in j["content"]:
+    let bt = blk{"type"}.getStr()
+    if bt == "text":
+      parts.add(blk{"text"}.getStr())
+    elif bt == "tool_use":
+      let input = if blk.hasKey("input") and blk["input"].kind == JObject: blk["input"]
+                  else: newJObject()
+      result.toolCalls.add(AIToolCall(
+        id: blk{"id"}.getStr(),
+        name: blk{"name"}.getStr(),
+        arguments: input))
+  result.content = parts.join("\n")
+
+proc doAgenticChat*(config: AppConfig, providerId, model: string,
+                    messages: JsonNode, planMode: bool): AgenticResult =
+  ## One round-trip of the agentic loop: send the conversation (canonical
+  ## OpenAI-format ``messages``) plus the tool schemas, and return the assistant
+  ## text along with any tool calls it requested. On failure ``error`` is set.
+  var baseUrl = config.aiBaseUrl
+  if baseUrl.len == 0:
+    baseUrl = defaultBaseUrl(providerId)
+  if baseUrl.len == 0:
+    baseUrl = "https://api.openai.com/v1"
+  let client = newChatClient(config, providerId)
+  let defs = builtinToolDefs(planMode)
+
+  var url, body: string
+  if isAnthropicProvider(providerId):
+    let (sys, msgs) = toAnthropicMessages(messages)
+    url = baseUrl & "/messages"
+    var bodyNode = %*{
+      "model": model,
+      "max_tokens": 4096,
+      "messages": msgs,
+      "tools": toAnthropicTools(defs)
+    }
+    if sys.len > 0:
+      bodyNode["system"] = %sys
+    body = $bodyNode
+  else:
+    url = baseUrl & "/chat/completions"
+    body = $ %*{
+      "model": model,
+      "messages": messages,
+      "tools": toOpenAITools(defs),
+      "tool_choice": "auto",
+      "stream": false
+    }
+
+  try:
+    let resp = retryableRequest(client, url, body)
+    if resp.code.int div 100 != 2:
+      result.error = "HTTP error " & $resp.code & ": " & resp.body
+      return
+    if isAnthropicProvider(providerId):
+      result = parseAnthropicAgentic(resp)
+    else:
+      result = parseOpenAIAgentic(resp)
+  except CatchableError as e:
+    result.error = "Request failed: " & e.msg
+  finally:
+    client.close()
