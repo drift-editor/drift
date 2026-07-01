@@ -766,6 +766,10 @@ proc runBuiltinAI(t: AIThread) {.thread.} =
           t.history.delete(0)
       else:
         var promptText = req.text
+        # Load project context (AGENTS.md or CLAUDE.md) for coding conventions.
+        let projectContext = loadProjectContext(t.workspaceRoot)
+        if projectContext.len > 0:
+          promptText = projectContext & "## User Request\n\n" & promptText
         # Use the lightweight model to detect git-related intent ONCE, then attach
         # local status + diff so the main model can answer without tool access.
         let isGitIntent = classifyGitIntent(t.config, req.text)

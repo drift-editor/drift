@@ -13,6 +13,7 @@ const
   HttpRetryBaseMs = 500     ## Base backoff (ms) before first retry.
   ChatRoleUser* = "user"
   ChatRoleAssistant* = "assistant"
+  MaxContextFileSize* = 16_384  ## Max bytes to read from project context files (16KB).
 
 type
   BuiltinModelProvider* = object
@@ -22,6 +23,35 @@ type
     models*: seq[string]
 
   ChatTurn* = tuple[role: string, content: string]
+
+proc loadProjectContext*(workspaceRoot: string): string =
+  ## Load project context files (AGENTS.md, CLAUDE.md) for the builtin agent.
+  ## These files provide coding conventions, build commands, and project rules.
+  ## Returns concatenated content of found files, or empty string.
+  if workspaceRoot.len == 0:
+    return ""
+
+  result = ""
+  let contextFiles = ["AGENTS.md", "CLAUDE.md"]
+
+  for fileName in contextFiles:
+    let filePath = workspaceRoot / fileName
+    if fileExists(filePath):
+      try:
+        let content = readFile(filePath)
+        if content.len > 0:
+          # Truncate if too large to avoid overwhelming the context window.
+          let truncated = if content.len > MaxContextFileSize:
+            content[0..<MaxContextFileSize] & "\n... (truncated)"
+          else:
+            content
+          result.add("## Project Context (" & fileName & ")\n\n")
+          result.add(truncated)
+          result.add("\n\n")
+          # Only load the first found file to keep context focused.
+          break
+      except CatchableError:
+        discard
 
 const BuiltinModelProviders* = [
   BuiltinModelProvider(
@@ -128,11 +158,16 @@ proc parseChatResult(resp: Response): string =
 proc parseAnthropicResult(resp: Response): string =
   ## Parse Anthropic Messages API response body.
   ## Returns the assistant message content, or an empty string on failure.
+  ## Handles multiple content blocks by concatenating text blocks.
   let j = parseJson(resp.body)
   if j.hasKey("content") and j["content"].kind == JArray and j["content"].len > 0:
-    let contentBlock = j["content"][0]
-    if contentBlock.hasKey("text"):
-      return contentBlock["text"].getStr()
+    var parts: seq[string]
+    for contentItem in j["content"]:
+      if contentItem.kind == JObject and contentItem.hasKey("type") and contentItem.hasKey("text"):
+        if contentItem["type"].getStr() == "text":
+          parts.add(contentItem["text"].getStr())
+    if parts.len > 0:
+      return parts.join("\n")
   return ""
 
 proc buildAnthropicRequest*(config: AppConfig, prompt: string): string =
@@ -219,18 +254,33 @@ proc doChatCompletionWithModel*(config: AppConfig, prompt, providerId, model: st
     baseUrl = defaultBaseUrl(providerId)
   if baseUrl.len == 0:
     baseUrl = "https://api.openai.com/v1"
-  let url = baseUrl & "/chat/completions"
-  let client = newChatClient(config)
-  let body = %*{
-    "model": model,
-    "messages": [{"role": "user", "content": prompt}],
-    "stream": false
-  }
+  let client = newChatClient(config, providerId)
+
+  var url: string
+  var body: string
+  if isAnthropicProvider(providerId):
+    url = baseUrl & "/messages"
+    body = $ %*{
+      "model": model,
+      "max_tokens": 4096,
+      "messages": [{"role": "user", "content": prompt}]
+    }
+  else:
+    url = baseUrl & "/chat/completions"
+    body = $ %*{
+      "model": model,
+      "messages": [{"role": "user", "content": prompt}],
+      "stream": false
+    }
+
   try:
-    let resp = retryableRequest(client, url, $body)
+    let resp = retryableRequest(client, url, body)
     if resp.code.int div 100 != 2:
       return "HTTP error " & $resp.code & ": " & resp.body
-    let parsed = parseChatResult(resp)
+    let parsed = if isAnthropicProvider(providerId):
+      parseAnthropicResult(resp)
+    else:
+      parseChatResult(resp)
     if parsed.len > 0:
       return parsed
     return "Unexpected response: " & resp.body
@@ -325,14 +375,25 @@ proc doChatCompletion*(config: AppConfig, prompt: string): string =
     baseUrl = defaultBaseUrl(providerId)
   if baseUrl.len == 0:
     baseUrl = "https://api.openai.com/v1"
-  let url = baseUrl & "/chat/completions"
-  let client = newChatClient(config)
-  let body = makeChatRequest(config, prompt)
+  let client = newChatClient(config, providerId)
+
+  var url: string
+  var body: string
+  if isAnthropicProvider(providerId):
+    url = baseUrl & "/messages"
+    body = buildAnthropicRequest(config, prompt)
+  else:
+    url = baseUrl & "/chat/completions"
+    body = makeChatRequest(config, prompt)
+
   try:
     let resp = retryableRequest(client, url, body)
     if resp.code.int div 100 != 2:
       return "HTTP error " & $resp.code & ": " & resp.body
-    let parsed = parseChatResult(resp)
+    let parsed = if isAnthropicProvider(providerId):
+      parseAnthropicResult(resp)
+    else:
+      parseChatResult(resp)
     if parsed.len > 0:
       return parsed
     return "Unexpected response: " & resp.body
@@ -352,14 +413,25 @@ proc doChatCompletionHistory*(config: AppConfig, prompt: string,
     baseUrl = defaultBaseUrl(providerId)
   if baseUrl.len == 0:
     baseUrl = "https://api.openai.com/v1"
-  let url = baseUrl & "/chat/completions"
-  let client = newChatClient(config)
-  let body = makeChatRequestHistory(config, prompt, history)
+  let client = newChatClient(config, providerId)
+
+  var url: string
+  var body: string
+  if isAnthropicProvider(providerId):
+    url = baseUrl & "/messages"
+    body = buildAnthropicRequestHistory(config, prompt, history)
+  else:
+    url = baseUrl & "/chat/completions"
+    body = makeChatRequestHistory(config, prompt, history)
+
   try:
     let resp = retryableRequest(client, url, body)
     if resp.code.int div 100 != 2:
       return "HTTP error " & $resp.code & ": " & resp.body
-    let parsed = parseChatResult(resp)
+    let parsed = if isAnthropicProvider(providerId):
+      parseAnthropicResult(resp)
+    else:
+      parseChatResult(resp)
     if parsed.len > 0:
       return parsed
     return "Unexpected response: " & resp.body
