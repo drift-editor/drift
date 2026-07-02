@@ -73,7 +73,7 @@ proc newWelcomeScreen*(): WelcomeScreen =
     label: "Command Palette", hotkey: "Ctrl+Shift+P", icon: iiListSelection, action: waCommands
   ))
   helpSection.items.add(WelcomeItem(
-    label: "Documentation", hotkey: "", icon: iiNone, action: waDocumentation
+    label: "Documentation", hotkey: "", icon: iiBook, action: waDocumentation
   ))
   screen.sections.add(helpSection)
 

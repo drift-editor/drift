@@ -43,6 +43,7 @@ type
     iiBug
     iiSend
     iiStop
+    iiBook
 
 var iconImages: Table[IconId, uirelays.screen.Image]
 const IconSize = 16
@@ -88,6 +89,7 @@ proc iconFileName(id: IconId): string =
   of iiBug: "bug.svg"
   of iiSend: "send.svg"
   of iiStop: "stop.svg"
+  of iiBook: "book.svg"
   of iiNone: ""
 
 proc loadIcons*() =
