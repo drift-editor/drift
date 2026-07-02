@@ -828,7 +828,8 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
     bounds.w - MessagePadding * 2,
     InputHeight - ToolbarHeight - 12
   )
-  fillRect(inputBounds, bg)
+  # Darker inset field so it (and the send button inside it) stand out from the panel
+  fillRect(inputBounds, headerBg)
   let inputBorderColor = if panel.focused: accentC else: borderC
   fillRect(rect(inputBounds.x, inputBounds.y, inputBounds.w, 1), inputBorderColor)
   fillRect(rect(inputBounds.x, inputBounds.y + inputBounds.h - 1, inputBounds.w, 1), inputBorderColor)
@@ -866,9 +867,9 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   let sendBtnX = inputBounds.x + inputBounds.w - sendBtnSize - 4
   let sendBtnY = inputBounds.y + inputBounds.h - sendBtnSize - 4
   let sendBtnBounds = rect(sendBtnX, sendBtnY, sendBtnSize, sendBtnSize)
-  let sendBtnBg = if panel.hoverStop: accentC else: currentTheme.getColor(tcSurfaceHover)
+  let sendBtnBg = if panel.hoverStop: currentTheme.getColor(tcSurfaceHover) else: currentTheme.getColor(tcSurface)
   fillRect(sendBtnBounds, sendBtnBg)
-  let sendBtnBorderC = if panel.hoverStop: accentC else: borderC
+  let sendBtnBorderC = if panel.hoverStop: currentTheme.getColor(tcTextSecondary) else: currentTheme.getColor(tcTextDisabled)
   fillRect(rect(sendBtnBounds.x, sendBtnBounds.y, sendBtnBounds.w, 1), sendBtnBorderC)
   fillRect(rect(sendBtnBounds.x, sendBtnBounds.y + sendBtnBounds.h - 1, sendBtnBounds.w, 1), sendBtnBorderC)
   fillRect(rect(sendBtnBounds.x, sendBtnBounds.y, 1, sendBtnBounds.h), sendBtnBorderC)

@@ -2323,6 +2323,10 @@ proc run*(app: App) =
 
     # Right panel (AI)
     if app.aiPanelVisible:
+      # Drop the input's focused (accent) border when focus is elsewhere.
+      # While focus is on the panel, keep its finer input/messages state intact.
+      if app.focus != "aiPanel":
+        app.aiPanel.focused = false
       app.aiPanel.render(app.uiFont, layout.rightPanel)
 
     # Poll file watcher for changes
