@@ -9,6 +9,11 @@ type
     windowHeight*: int
     windowTitle*: string
     themeName*: string
+    # Editor settings
+    tabSize*: int
+    autoIndent*: bool
+    bracketHighlight*: bool
+    autoCloseBrackets*: bool
     lspServer*: string
     lspConfig*: JsonNode  # Server-specific LSP configuration
     dapServer*: string
@@ -41,6 +46,10 @@ proc defaultConfig*(): AppConfig =
     windowHeight: 800,
     windowTitle: "Drift",
     themeName: "dark",
+    tabSize: 2,
+    autoIndent: true,
+    bracketHighlight: true,
+    autoCloseBrackets: true,
     lspServer: "minlsp",
     lspConfig: newJObject(),
     dapServer: "nim_debug_adapter",
@@ -75,6 +84,15 @@ proc loadConfig*(): AppConfig =
       result.windowTitle = j["windowTitle"].getStr()
     if j.hasKey("theme"):
       result.themeName = j["theme"].getStr()
+    if j.hasKey("tabSize"):
+      let ts = j["tabSize"].getInt()
+      if ts >= 1 and ts <= 8: result.tabSize = ts
+    if j.hasKey("autoIndent"):
+      result.autoIndent = j["autoIndent"].getBool()
+    if j.hasKey("bracketHighlight"):
+      result.bracketHighlight = j["bracketHighlight"].getBool()
+    if j.hasKey("autoCloseBrackets"):
+      result.autoCloseBrackets = j["autoCloseBrackets"].getBool()
     if j.hasKey("lspServer"):
       result.lspServer = j["lspServer"].getStr()
     if j.hasKey("lspConfig"):
@@ -150,6 +168,10 @@ proc saveConfig*(config: AppConfig) =
     "windowHeight": config.windowHeight,
     "windowTitle": config.windowTitle,
     "theme": config.themeName,
+    "tabSize": config.tabSize,
+    "autoIndent": config.autoIndent,
+    "bracketHighlight": config.bracketHighlight,
+    "autoCloseBrackets": config.autoCloseBrackets,
     "lspServer": config.lspServer,
     "lspConfig": config.lspConfig,
     "dapServer": config.dapServer,

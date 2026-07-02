@@ -332,6 +332,83 @@ template buildEditorRoot*(app, layout): Node =
     diagNode.setCursorStyle(curHand)
     statusNode.addChild(diagNode)
 
+  # Line-ending and encoding clickable sections
+  let leIdx = app.statusBar.lineEndingIndex
+  if leIdx >= 0 and leIdx < app.statusBar.rightSectionBounds.len:
+    let leBounds = app.statusBar.rightSectionBounds[leIdx]
+    if leBounds.w > 0:
+      let leNode = newNode("lineEndingSection")
+      leNode.bounds = leBounds
+      leNode.zIndex = 5
+      leNode.onMouseDown = proc(n: Node, e: Event): bool =
+        app.contextMenu.clear()
+        let anchor = n.bounds
+        app.contextMenu.addItem("le_lf", "LF", proc() =
+          if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len and
+             not app.buffers[app.currentBuffer].isImage:
+            var text = app.buffers[app.currentBuffer].ed.fullText()
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            app.buffers[app.currentBuffer].ed.setText(text)
+            app.buffers[app.currentBuffer].ed.markChanged()
+            app.updateStatus())
+        app.contextMenu.addItem("le_crlf", "CRLF", proc() =
+          if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len and
+             not app.buffers[app.currentBuffer].isImage:
+            var text = app.buffers[app.currentBuffer].ed.fullText()
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            text = text.replace("\n", "\r\n")
+            app.buffers[app.currentBuffer].ed.setText(text)
+            app.buffers[app.currentBuffer].ed.markChanged()
+            app.updateStatus())
+        app.contextMenu.addItem("le_cr", "CR", proc() =
+          if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len and
+             not app.buffers[app.currentBuffer].isImage:
+            var text = app.buffers[app.currentBuffer].ed.fullText()
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            text = text.replace("\n", "\r")
+            app.buffers[app.currentBuffer].ed.setText(text)
+            app.buffers[app.currentBuffer].ed.markChanged()
+            app.updateStatus())
+        app.contextMenu.showAt(anchor.x, anchor.y - app.contextMenu.bounds.h, app.width, app.height)
+        true
+      leNode.setCursorStyle(curHand)
+      statusNode.addChild(leNode)
+
+  let encIdx = app.statusBar.encodingIndex
+  if encIdx >= 0 and encIdx < app.statusBar.rightSectionBounds.len:
+    let encBounds = app.statusBar.rightSectionBounds[encIdx]
+    if encBounds.w > 0:
+      let encNode = newNode("encodingSection")
+      encNode.bounds = encBounds
+      encNode.zIndex = 5
+      encNode.onMouseDown = proc(n: Node, e: Event): bool =
+        app.contextMenu.clear()
+        let anchor = n.bounds
+        app.contextMenu.addItem("enc_utf8", "UTF-8 (current)", proc() = discard)
+        app.contextMenu.addItem("enc_latin1", "Re-open as Latin-1", proc() =
+          if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+            let path = app.buffers[app.currentBuffer].path
+            if path.len > 0 and fileExists(path):
+              try:
+                let raw = readFile(path)
+                var converted = newStringOfCap(raw.len * 2)
+                for c in raw:
+                  let b = ord(c)
+                  if b < 128:
+                    converted.add(c)
+                  else:
+                    # Encode Latin-1 byte as UTF-8 two-byte sequence
+                    converted.add(chr(0xC0 or (b shr 6)))
+                    converted.add(chr(0x80 or (b and 0x3F)))
+                app.buffers[app.currentBuffer].ed.setText(converted)
+                discard app.notificationManager.info("Re-opened as Latin-1")
+              except CatchableError as ex:
+                discard app.notificationManager.error("Failed to re-open: " & ex.msg))
+        app.contextMenu.showAt(anchor.x, anchor.y - app.contextMenu.bounds.h, app.width, app.height)
+        true
+      encNode.setCursorStyle(curHand)
+      statusNode.addChild(encNode)
+
   # Tab bar node
   let tabNode = newNode("tabBar")
   tabNode.bounds = rect(TabBarStartX,

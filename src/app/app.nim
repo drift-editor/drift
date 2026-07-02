@@ -1,10 +1,11 @@
 ## Drift Editor - uirelays-based Application
 
-import std/[os, osproc, strutils, json, options, monotimes, times, atomics]
+import std/[os, osproc, strutils, json, options, monotimes, times, atomics, tables]
 import uirelays
 import chronos
 from pixie import readImage
 import widgets/[synedit, terminal]
+import widgets/theme as synTheme
 import ../ui/[tabs, command_palette, search_panel, notification, dialog, context_menu, file_explorer, git_panel, welcome_screen, theme, hover_tooltip, file_dialog, statusbar, icons, theme_loader, theme_selector, location_picker, node, diagnostics_panel, ai_panel, debug_panel, debug_sidebar, model_select_dialog]
 import explorer_context
 import ../services/[lsp_thread, lsp_client, ai_thread, ai_model_detector, builtin_ai]
@@ -14,7 +15,8 @@ import ../core/types
 import ../core/config as cfg
 import ../core/debug_types
 import ../core/recent_files
-import ../editor/[marker_manager, color_highlight, git_diff, sticky_scroll]
+import ../core/keybindings as kb
+import ../editor/[marker_manager, color_highlight, git_diff, sticky_scroll, auto_close]
 import ../utils/text
 import ../utils/file_watcher
 import app_layout, app_cursors, event_router, app_tree, app_commands, commands
@@ -149,6 +151,12 @@ type
 const
   TerminalHeight = 200
 
+proc editorTheme(app: App): synTheme.Theme =
+  ## Build a SynEdit theme from the current UI theme, respecting bracketHighlight config.
+  result = driftSyneditTheme()
+  if not app.config.bracketHighlight:
+    result.bracketBg = color(0, 0, 0, 0)
+
 proc renderTitleBarButtons(app: App) =
   let bg = currentTheme.getColor(tcBackground)
   let surface = currentTheme.getColor(tcSurface)
@@ -183,7 +191,7 @@ proc setTheme*(app: App, name: string) =
     return
   setTheme(loadThemeByName(name))
   for i in 0 ..< app.buffers.len:
-    app.buffers[i].ed.theme = driftSyneditTheme()
+    app.buffers[i].ed.theme = app.editorTheme()
   app.term.ed.theme = driftSyneditTheme()
   if app.diffView != nil:
     app.diffView.leftEd.theme = driftSyneditTheme()
@@ -607,6 +615,8 @@ proc updateStatus(app: App) =
       lspIdx = 1
       dapIdx = 2
       aiIdx = 3
+      app.statusBar.lineEndingIndex = -1
+      app.statusBar.encodingIndex = -1
     else:
       let modified = if b.ed.changed: " *" else: ""
       let text = b.ed.fullText
@@ -630,6 +640,8 @@ proc updateStatus(app: App) =
       lspIdx = 4
       dapIdx = 5
       aiIdx = 6
+      app.statusBar.encodingIndex = 1
+      app.statusBar.lineEndingIndex = 2
 
   let statusText = leftSections.join(" | ") & " :: " & rightSections.join(" | ")
   if statusText != app.lastStatusText or currLine != app.lastCurrentLine or currCol != app.lastCurrentCol:
@@ -1036,7 +1048,7 @@ proc showDiffView*(app: App; path: string; staged: bool = false) =
       app.switchBuffer(i)
       return
   # Create a new diff buffer
-  var ed = createSynEdit(app.font, driftSyneditTheme())
+  var ed = createSynEdit(app.font, app.editorTheme())
   app.buffers.add(Buffer(
     ed: ed, path: path, readOnly: true,
     diffPath: path, diffStaged: staged))
@@ -1252,7 +1264,7 @@ proc openBuffer(app: App, path: string): int =
     except CatchableError:
       imgW = 0
       imgH = 0
-    var ed = createSynEdit(app.font, driftSyneditTheme())
+    var ed = createSynEdit(app.font, app.editorTheme())
     app.buffers.add(Buffer(
       ed: ed, path: path, isImage: true, image: img,
       imageWidth: imgW, imageHeight: imgH))
@@ -1267,9 +1279,10 @@ proc openBuffer(app: App, path: string): int =
     app.switchBuffer(result)
     return result
 
-  var ed = createSynEdit(app.font, driftSyneditTheme())
+  var ed = createSynEdit(app.font, app.editorTheme())
   ed.showLineNumbers = true
   ed.lang = fileExtToLanguage(path.splitFile.ext)
+  ed.tabSize = app.config.tabSize
   if fileExists(path):
     try:
       ed.loadFromFile(path)
@@ -1298,9 +1311,10 @@ proc openBuffer(app: App, path: string): int =
       app.lspThread.notifyDidOpen(path, ed.fullText())
 
 proc newBuffer(app: App) =
-  var ed = createSynEdit(app.font, driftSyneditTheme())
+  var ed = createSynEdit(app.font, app.editorTheme())
   ed.showLineNumbers = true
   ed.lang = langNim
+  ed.tabSize = app.config.tabSize
   app.buffers.add(Buffer(ed: ed, path: "", isImage: false))
   app.bufferMarkers.add(initBufferMarkers())
   app.lastColorScanCacheIds.add(0)
@@ -1823,6 +1837,29 @@ proc init*(app: App) =
       app.showTerminal = true
       app.bottomPanelTab = "debug")
 
+  app.commandPalette.registerCommand("editor.toggleBracketHighlight", "Toggle Bracket Highlighting", "Show or hide matching bracket highlight", ccEdit, "",
+    proc() =
+      app.config.bracketHighlight = not app.config.bracketHighlight
+      for i in 0 ..< app.buffers.len:
+        app.buffers[i].ed.theme = app.editorTheme()
+      saveAppConfig(app))
+
+  app.commandPalette.registerCommand("editor.toggleAutoIndent", "Toggle Auto Indent", "Enable or disable smart auto-indent on Enter", ccEdit, "",
+    proc() =
+      app.config.autoIndent = not app.config.autoIndent
+      saveAppConfig(app))
+
+  app.commandPalette.registerCommand("editor.toggleAutoClose", "Toggle Auto Close Brackets", "Enable or disable auto-closing of brackets and quotes", ccEdit, "",
+    proc() =
+      app.config.autoCloseBrackets = not app.config.autoCloseBrackets
+      saveAppConfig(app))
+
+  app.commandPalette.registerCommand("keybindings.open", "Open Keybindings File", "Edit keybinding overrides in ~/.config/drift/keybindings.toml", ccView, "",
+    proc() =
+      let kbPath = kb.keybindingsPath()
+      kb.ensureDefaultKeybindingsFile(kbPath)
+      discard app.openBuffer(kbPath))
+
   app.commandPalette.onFileSelect = proc(path: string) =
     discard app.openBuffer(path)
 
@@ -1896,6 +1933,15 @@ proc showLocationPicker*(app: App, locations: seq[Location]) =
 proc run*(app: App) =
   # Command system init (done here so template can see all app procs)
   initCommands(app)
+
+  # Apply user keybinding overrides from ~/.config/drift/keybindings.toml
+  kb.ensureDefaultKeybindingsFile(kb.keybindingsPath())
+  let kbOverrides = kb.loadKeybindings(kb.keybindingsPath())
+  for cmdId, binding in kbOverrides.pairs:
+    if app.commands.hasCommand(cmdId):
+      app.commands.bindKey(binding.mods, binding.key, cmdId)
+    else:
+      stderr.writeLine("[keybindings] unknown command id: " & cmdId)
 
   var running = true
   app.welcomeScreen.show()
@@ -2562,6 +2608,41 @@ proc run*(app: App) =
           # If any node in the tree consumed the event (e.g. editorNode.onMouseMove
           # wrongly returning true), SynEdit receives NoEvent and cannot probe.
           edEvent = default Event
+
+        # Auto-close pre-processing: intercept before SynEdit sees the event.
+        if app.config.autoCloseBrackets and app.focus == "editor" and
+           not app.buffers[idx].readOnly and not app.gi.isConsumed:
+          let acEd = addr app.buffers[idx].ed
+          if edEvent.kind == TextInputEvent:
+            var text = ""
+            for c in edEvent.text:
+              if c == '\0': break
+              text.add c
+            if text.len == 1:
+              let ch = text[0]
+              if shouldSkipOver(acEd[], ch):
+                # Already sitting on this closer — advance cursor past it.
+                acEd[].gotoPos(acEd[].cursor + 1)
+                edEvent = default Event
+              elif shouldAutoClose(acEd[], ch):
+                let closing = pairClose(ch)
+                if closing != '\0':
+                  let insertPos = acEd[].cursor
+                  acEd[].insertText($ch & $closing)
+                  acEd[].gotoPos(insertPos + 1)
+                  edEvent = default Event
+          elif edEvent.kind == KeyDownEvent and edEvent.key == KeyBackspace and
+               edEvent.mods == {}:
+            if shouldDeletePair(acEd[]):
+              # Delete both opener (before cursor) and closer (after cursor).
+              let pos = acEd[].cursor
+              var full = acEd[].fullText()
+              if pos > 0 and pos < full.len:
+                full = full[0 ..< pos - 1] & full[pos + 1 .. ^1]
+                acEd[].setText(full)
+                acEd[].gotoPos(pos - 1)
+              edEvent = default Event
+
         let editorHovered = e.kind == MouseWheelEvent and editorBounds.contains(point(e.x, e.y))
         let edAct = app.buffers[idx].ed.draw(edEvent, editorBounds, app.focus == "editor" or editorHovered)
         case edAct.kind

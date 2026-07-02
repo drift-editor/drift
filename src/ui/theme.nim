@@ -162,7 +162,7 @@ import widgets/theme as synTheme
 proc driftSyneditTheme*(): synTheme.Theme =
   result.bg = currentTheme.getColor(tcBackground)
   result.selBg = currentTheme.getColor(tcSelection)
-  result.bracketBg = currentTheme.getColor(tcSurfaceHover)
+  result.bracketBg = color(60, 80, 50, 255)  ## visible greenish highlight for matched brackets
   result.cursorColor = currentTheme.getColor(tcCursor)
   result.lineNumColor = currentTheme.getColor(tcLineNumber)
   result.markerBg = color(55, 60, 45, 255)
