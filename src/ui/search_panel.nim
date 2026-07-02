@@ -5,6 +5,7 @@ import uirelays/[coords, screen, input]
 import widgets/synedit
 import ../widgets/widgets
 import theme, icons
+import ../utils/search_engine
 
 const
   HEADER_HEIGHT = 28
@@ -215,14 +216,16 @@ proc findAll*(panel: var SearchPanel; ed: ptr SynEdit) =
         excludeExtArg.add(" ")
       excludeExtArg.add("--glob !*" & ext)
 
-    var rgFlags = "rg -n"
-    if not panel.caseSensitive:
-      rgFlags &= " -i"
-    if not panel.useRegex:
-      rgFlags &= " -F"
-    let rgCmd = rgFlags & " " & excludeExtArg & " " & panel.findText.quoteShell() & " ."
-
-    let (output, _) = execCmdEx(rgCmd, workingDir = panel.workspaceRoot)
+    let searchCmd = buildSearchTextCmd(panel.findText, panel.workspaceRoot,
+                                       panel.caseSensitive, panel.useRegex,
+                                       ExcludedDirs, ExcludedExts)
+    var output = ""
+    if searchCmd.len > 0:
+      (output, _) = execCmdEx(searchCmd, workingDir = panel.workspaceRoot)
+    else:
+      output = fallbackSearchText(panel.findText, panel.workspaceRoot,
+                                  panel.caseSensitive, panel.useRegex,
+                                  ExcludedDirs, ExcludedExts)
 
     withLock(panel.workspaceSearchLock):
       panel.workspaceSearchInProgress = false

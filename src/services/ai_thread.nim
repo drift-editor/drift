@@ -9,6 +9,7 @@ else:
   import std/posix
 import ../channel_spsc
 import ../core/config
+import ../utils/search_engine
 import builtin_ai
 import prompt_complexity
 import git as gitcmd
@@ -989,49 +990,50 @@ proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode,
   of "search_text":
     let pattern = args{"pattern"}.getStr()
     if pattern.len == 0: return ("Error: 'pattern' is required.", @[], false, "", "", "")
-    if findExe("rg").len == 0:
-      return ("Error: ripgrep (rg) is not installed; text search is unavailable.", @[], false, "", "", "")
-    var relArg = "."
     let subPath = args{"path"}.getStr()
+    var searchRoot = t.workspaceRoot
     if subPath.len > 0:
       let absPath = resolveWorkspacePath(subPath, t.workspaceRoot)
       if not isPathInsideWorkspace(absPath, t.workspaceRoot):
         return ("Error: path is outside the workspace.", @[], false, "", "", "")
-      relArg = quoteShell(subPath)
+      searchRoot = absPath
     let caseSensitive = args{"case_sensitive"}.getBool(false)
     let isRegex = args{"is_regex"}.getBool(false)
-    var cmd = "rg -n --no-heading --color never"
-    if not caseSensitive: cmd &= " -i"
-    if not isRegex: cmd &= " -F"
-    cmd &= " -- " & quoteShell(pattern) & " " & relArg
-    try:
-      let (output, _) = execCmdEx(cmd, workingDir = t.workspaceRoot)
-      if output.strip().len == 0:
-        return ("(no matches)", @[], false, "", "", "")
-      return (capToolOutput(output), @[], false, "", "", "")
-    except CatchableError as e:
-      return ("Error running search: " & e.msg, @[], false, "", "", "")
+    let cmd = buildSearchTextCmd(pattern, searchRoot, caseSensitive, isRegex)
+    var output = ""
+    if cmd.len > 0:
+      try:
+        (output, _) = execCmdEx(cmd, workingDir = searchRoot)
+      except CatchableError as e:
+        return ("Error running search: " & e.msg, @[], false, "", "", "")
+    else:
+      output = fallbackSearchText(pattern, searchRoot, caseSensitive, isRegex)
+    if output.strip().len == 0:
+      return ("(no matches)", @[], false, "", "", "")
+    return (capToolOutput(output), @[], false, "", "", "")
 
   of "find_files":
     let pattern = args{"pattern"}.getStr()
     if pattern.len == 0: return ("Error: 'pattern' is required.", @[], false, "", "", "")
-    if findExe("rg").len == 0:
-      return ("Error: ripgrep (rg) is not installed; file search is unavailable.", @[], false, "", "", "")
-    var relArg = "."
     let subPath = args{"path"}.getStr()
+    var searchRoot = t.workspaceRoot
     if subPath.len > 0:
       let absPath = resolveWorkspacePath(subPath, t.workspaceRoot)
       if not isPathInsideWorkspace(absPath, t.workspaceRoot):
         return ("Error: path is outside the workspace.", @[], false, "", "", "")
-      relArg = quoteShell(subPath)
-    let cmd = "rg --files -g " & quoteShell(pattern) & " " & relArg
-    try:
-      let (output, _) = execCmdEx(cmd, workingDir = t.workspaceRoot)
-      if output.strip().len == 0:
-        return ("(no files matched)", @[], false, "", "", "")
-      return (capToolOutput(output), @[], false, "", "", "")
-    except CatchableError as e:
-      return ("Error finding files: " & e.msg, @[], false, "", "", "")
+      searchRoot = absPath
+    let cmd = buildFindFilesCmd(pattern, searchRoot)
+    var output = ""
+    if cmd.len > 0:
+      try:
+        (output, _) = execCmdEx(cmd, workingDir = searchRoot)
+      except CatchableError as e:
+        return ("Error finding files: " & e.msg, @[], false, "", "", "")
+    else:
+      output = fallbackFindFiles(pattern, searchRoot)
+    if output.strip().len == 0:
+      return ("(no files matched)", @[], false, "", "", "")
+    return (capToolOutput(output), @[], false, "", "", "")
 
   else:
     return ("Error: unknown tool '" & name & "'.", @[], false, "", "", "")
