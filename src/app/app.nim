@@ -404,7 +404,7 @@ proc showUnifiedModelDialog(app: App) =
   app.modelSelectDialog.heavyProvider = app.config.aiHeavyweightModelProvider
   app.modelSelectDialog.heavyModel = app.config.aiHeavyweightModel
   app.modelSelectDialog.enabledModels = app.config.aiEnabledModels
-  app.modelSelectDialog.setModels(allBuiltinModels())
+  app.modelSelectDialog.setModels(allBuiltinModels(app.config))
   app.modelSelectDialog.centerOnScreen(app.width, app.height)
   app.modelSelectDialog.onSelectAuto = proc() =
     app.selectPreset("auto")

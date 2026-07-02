@@ -46,6 +46,38 @@ assertEq(j3["messages"].len, 1, "makeChatRequest single turn")
 assertEq(ChatRoleUser, "user", "ChatRoleUser constant")
 assertEq(ChatRoleAssistant, "assistant", "ChatRoleAssistant constant")
 
+# --- allBuiltinModels honors aiEnabledModels ---
+var cfgEnabled = defaultConfig()
+cfgEnabled.aiEnabledModels = @["openai/gpt-5.5"]
+let enabledModels = allBuiltinModels(cfgEnabled)
+assertEq(enabledModels.len > 0, true, "at least one model enabled")
+for m in enabledModels:
+  assertEq(m.providerId, "openai", "only openai models should be enabled")
+let allModels = allBuiltinModels()
+assertEq(allModels.len > enabledModels.len, true, "allBuiltinModels should include more when unfiltered")
+
+# --- isBuiltinModelEnabled ---
+var cfgModels = defaultConfig()
+assertEq(isBuiltinModelEnabled(cfgModels, "deepseek", "deepseek-v4-flash"), true, "empty list enables all")
+cfgModels.aiEnabledModels = @["deepseek/deepseek-v4-pro"]
+assertEq(isBuiltinModelEnabled(cfgModels, "deepseek", "deepseek-v4-pro"), true, "enabled model")
+assertEq(isBuiltinModelEnabled(cfgModels, "deepseek", "deepseek-v4-flash"), false, "disabled model")
+
+# --- doChatCompletionWithModel rejects disabled model ---
+var cfgDisabled = defaultConfig()
+cfgDisabled.aiEnabledModels = @["openai/gpt-5.5"]
+let disabledResult = doChatCompletionWithModel(cfgDisabled, "hi", "deepseek", "deepseek-v4-flash")
+assertEq(disabledResult.startsWith("Model disabled"), true, "doChatCompletionWithModel should reject disabled model")
+
+# --- doChatCompletion rejects disabled model via resolveBuiltinModel ---
+var cfgPreset = defaultConfig()
+cfgPreset.aiModelPreset = "lightweight"
+cfgPreset.aiLightweightModelProvider = "deepseek"
+cfgPreset.aiLightweightModel = "deepseek-v4-flash"
+cfgPreset.aiEnabledModels = @["deepseek/deepseek-v4-pro"]
+let presetDisabled = doChatCompletion(cfgPreset, "hello")
+assertEq(presetDisabled.startsWith("Model disabled"), true, "doChatCompletion should reject disabled preset model")
+
 # --- Thinking-mode support detection (DeepSeek) ---
 assertEq(providerSupportsThinking("deepseek"), true, "deepseek supports thinking")
 assertEq(providerSupportsThinking("DeepSeek"), true, "provider check is case-insensitive")

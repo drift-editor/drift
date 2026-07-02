@@ -104,10 +104,15 @@ proc shouldUseHeavyweight*(config: AppConfig; prompt: string; contextLen: int = 
 
 proc resolveBuiltinModel*(config: AppConfig; prompt: string): tuple[provider, model: string] =
   ## Resolve the effective provider/model, routing "auto" by prompt complexity.
+  ## Returns ("", "") when the selected model is explicitly disabled.
   let preset = config.aiModelPreset.toLowerAscii()
   if preset == "auto" and prompt.len > 0 and
       config.aiLightweightModel.len > 0 and config.aiHeavyweightModel.len > 0:
     if scorePromptComplexity(prompt) >= AutoComplexityThreshold:
-      return (config.aiHeavyweightModelProvider, config.aiHeavyweightModel)
-    return (config.aiLightweightModelProvider, config.aiLightweightModel)
-  return effectiveBuiltinModel(config)
+      result = (config.aiHeavyweightModelProvider, config.aiHeavyweightModel)
+    else:
+      result = (config.aiLightweightModelProvider, config.aiLightweightModel)
+  else:
+    result = effectiveBuiltinModel(config)
+  if not isBuiltinModelEnabled(config, result.provider, result.model):
+    return ("", "")

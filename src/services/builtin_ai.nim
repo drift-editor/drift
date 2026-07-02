@@ -122,8 +122,17 @@ proc isHttpAgent*(agentId: string): bool =
   ## Only the built-in agent speaks HTTP directly; everything else uses ACP.
   agentId.toLowerAscii() == "builtin"
 
+proc allBuiltinModels*(config: AppConfig): seq[tuple[providerId, model, label: string]] =
+  ## Flat list of every built-in model with a display label, optionally filtered
+  ## to models the user has enabled.
+  for mp in BuiltinModelProviders:
+    for m in mp.models:
+      if isBuiltinModelEnabled(config, mp.id, m):
+        result.add((mp.id, m, mp.label & " — " & m))
+
 proc allBuiltinModels*(): seq[tuple[providerId, model, label: string]] =
-  ## Flat list of every built-in model with a display label.
+  ## Flat list of every built-in model (convenience overload when no config is
+  ## in scope; all models are treated as enabled).
   for mp in BuiltinModelProviders:
     for m in mp.models:
       result.add((mp.id, m, mp.label & " — " & m))
@@ -275,7 +284,9 @@ proc makeChatRequestHistory*(config: AppConfig, prompt: string,
 proc doChatCompletionWithModel*(config: AppConfig, prompt, providerId, model: string): string =
   ## Synchronous HTTP call to a specific provider/model (single-turn).
   ## Returns the assistant message content, or an error string starting with
-  ## "HTTP error", "Request failed", or "Unexpected response".
+  ## "HTTP error", "Request failed", "Unexpected response", or "Model disabled".
+  if not isBuiltinModelEnabled(config, providerId, model):
+    return "Model disabled: " & providerId & "/" & model
   var baseUrl = config.aiBaseUrl
   if baseUrl.len == 0:
     baseUrl = defaultBaseUrl(providerId)
@@ -337,7 +348,7 @@ Respond with exactly one word: YES or NO.
 User message: """ & userText & "\n\nAnswer:"
   let provider = config.aiLightweightModelProvider
   let model = config.aiLightweightModel
-  if provider.len == 0 or model.len == 0:
+  if provider.len == 0 or model.len == 0 or not isBuiltinModelEnabled(config, provider, model):
     return false
   let answer = doChatCompletionWithModel(config, classifierPrompt, provider, model).strip().toLowerAscii()
   return answer.startsWith("yes")
@@ -395,8 +406,12 @@ proc buildGitContextPrompt*(repoRoot, userText: string): string =
 proc doChatCompletion*(config: AppConfig, prompt: string): string =
   ## Synchronous HTTP call to the configured endpoint (single-turn).
   ## Returns the assistant message content, or an error string starting with
-  ## "HTTP error", "Request failed", or "Unexpected response".
-  let (providerId, _) = resolveBuiltinModel(config, prompt)
+  ## "HTTP error", "Request failed", "Unexpected response", or "Model disabled".
+  let (providerId, model) = resolveBuiltinModel(config, prompt)
+  if providerId.len == 0 or model.len == 0:
+    return "Model disabled"
+  if not isBuiltinModelEnabled(config, providerId, model):
+    return "Model disabled: " & providerId & "/" & model
   var baseUrl = config.aiBaseUrl
   if baseUrl.len == 0:
     baseUrl = defaultBaseUrl(providerId)
@@ -433,8 +448,12 @@ proc doChatCompletionHistory*(config: AppConfig, prompt: string,
                               history: seq[ChatTurn]): string =
   ## Synchronous HTTP call to the configured endpoint with multi-turn history.
   ## Returns the assistant message content, or an error string starting with
-  ## "HTTP error", "Request failed", or "Unexpected response".
-  let (providerId, _) = resolveBuiltinModel(config, prompt)
+  ## "HTTP error", "Request failed", "Unexpected response", or "Model disabled".
+  let (providerId, model) = resolveBuiltinModel(config, prompt)
+  if providerId.len == 0 or model.len == 0:
+    return "Model disabled"
+  if not isBuiltinModelEnabled(config, providerId, model):
+    return "Model disabled: " & providerId & "/" & model
   var baseUrl = config.aiBaseUrl
   if baseUrl.len == 0:
     baseUrl = defaultBaseUrl(providerId)
@@ -692,6 +711,10 @@ proc doAgenticChat*(config: AppConfig, providerId, model: string,
   ## When ``effort`` is non-empty and the provider supports it (DeepSeek), the
   ## request opts into thinking mode at that reasoning effort and the reply's
   ## chain-of-thought is captured in ``result.reasoning``.
+  ## Returns an error immediately if the requested model is disabled.
+  if not isBuiltinModelEnabled(config, providerId, model):
+    result.error = "Model disabled: " & providerId & "/" & model
+    return
   var baseUrl = config.aiBaseUrl
   if baseUrl.len == 0:
     baseUrl = defaultBaseUrl(providerId)

@@ -1085,6 +1085,9 @@ proc runBuiltinAgentic(t: AIThread, userText: string) =
   ## and modify workspace files directly, iterating until it returns a final
   ## text answer. Only the final answer is persisted to conversation history.
   let (provider, model) = resolveBuiltinModel(t.config, userText)
+  if provider.len == 0 or model.len == 0:
+    t.sendResponse(AIMessage(kind: amkError, error: "Model disabled"))
+    return
 
   var systemPrompt =
     "You are the AI assistant embedded in the Drift code editor. You operate " &
@@ -1249,7 +1252,8 @@ proc runBuiltinAI(t: AIThread) {.thread.} =
           if t.planMode:
             promptText = PlanModePrompt & "\n\n## User Request\n\n" & promptText
           let answer = doChatCompletionHistory(t.config, promptText, t.history)
-          if answer.startsWith("HTTP error") or answer.startsWith("Request failed") or answer.startsWith("Unexpected response"):
+          if answer.startsWith("HTTP error") or answer.startsWith("Request failed") or
+             answer.startsWith("Unexpected response") or answer.startsWith("Model disabled"):
             t.sendResponse(AIMessage(kind: amkError, error: answer))
           else:
             t.history.add((role: ChatRoleUser, content: req.text))

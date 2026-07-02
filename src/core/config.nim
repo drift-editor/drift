@@ -150,6 +150,13 @@ proc aiDisplayName*(config: AppConfig): string =
     return base & " (" & config.aiModel & ")"
   return base
 
+proc isBuiltinModelEnabled*(config: AppConfig; providerId, model: string): bool =
+  ## Check whether a built-in model is enabled. An empty aiEnabledModels list
+  ## means all models are enabled (backward compatible).
+  if config.aiEnabledModels.len == 0:
+    return true
+  return (providerId & "/" & model) in config.aiEnabledModels
+
 proc effectiveBuiltinModel*(config: AppConfig): tuple[provider, model: string] =
   ## Resolve lightweight/heavyweight/auto preset to a built-in model provider/model pair.
   let preset = config.aiModelPreset.toLowerAscii()

@@ -77,9 +77,37 @@ Explain the trade-offs and suggest data structures to minimize complexity.
   let (_, forcedHeavy) = resolveBuiltinModel(cfg, "hi")
   assert forcedHeavy == "deepseek-v4-pro", "heavyweight preset should ignore prompt"
 
+proc testResolveBuiltinModelDisabled() =
+  var cfg = defaultConfig()
+  cfg.aiModelPreset = "lightweight"
+  cfg.aiLightweightModelProvider = "deepseek"
+  cfg.aiLightweightModel = "deepseek-v4-flash"
+  cfg.aiHeavyweightModelProvider = "deepseek"
+  cfg.aiHeavyweightModel = "deepseek-v4-pro"
+
+  let (_, enabled) = resolveBuiltinModel(cfg, "rename x")
+  assert enabled == "deepseek-v4-flash", "lightweight model should be enabled by default"
+
+  cfg.aiEnabledModels = @["deepseek/deepseek-v4-pro"]
+  let (disabledProvider, disabledModel) = resolveBuiltinModel(cfg, "rename x")
+  assert disabledProvider == "" and disabledModel == "", "disabled lightweight model should return empty"
+
+  cfg.aiModelPreset = "heavyweight"
+  let (_, stillEnabled) = resolveBuiltinModel(cfg, "hi")
+  assert stillEnabled == "deepseek-v4-pro", "heavyweight model should still be enabled"
+
+proc testIsBuiltinModelEnabled() =
+  var cfg = defaultConfig()
+  assert isBuiltinModelEnabled(cfg, "deepseek", "deepseek-v4-flash") == true, "empty list means all enabled"
+  cfg.aiEnabledModels = @["deepseek/deepseek-v4-pro"]
+  assert isBuiltinModelEnabled(cfg, "deepseek", "deepseek-v4-pro") == true, "enabled model not recognized"
+  assert isBuiltinModelEnabled(cfg, "deepseek", "deepseek-v4-flash") == false, "disabled model reported as enabled"
+
 when isMainModule:
   testBasicScoring()
   testCodeBlockScoring()
   testMultiPartScoring()
   testResolveBuiltinModel()
+  testResolveBuiltinModelDisabled()
+  testIsBuiltinModelEnabled()
   echo "All prompt complexity tests passed!"
