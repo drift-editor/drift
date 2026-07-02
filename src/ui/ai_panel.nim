@@ -778,17 +778,19 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
     let toggleBounds = rect(toggleX, toolbarY, toggleW, toggleH)
     let toggleBg = if panel.hoverPlanMode: currentTheme.getColor(tcSurfaceHover) else: bg
     fillRect(toggleBounds, toggleBg)
+    # Active side highlight (neutral surface, not the blue accent)
+    let halfW = toggleW div 2
+    let activeBg = currentTheme.getColor(tcSurfaceHover)
+    if panel.planMode:
+      fillRect(rect(toggleBounds.x, toggleBounds.y, halfW, toggleBounds.h), activeBg)
+    else:
+      fillRect(rect(toggleBounds.x + halfW, toggleBounds.y, toggleW - halfW, toggleBounds.h), activeBg)
+    # Border on top so the (hover) border spans the full toggle, not just one half
     let toggleBorderC = if panel.hoverPlanMode: accentC else: borderC
     fillRect(rect(toggleBounds.x, toggleBounds.y, toggleBounds.w, 1), toggleBorderC)
     fillRect(rect(toggleBounds.x, toggleBounds.y + toggleBounds.h - 1, toggleBounds.w, 1), toggleBorderC)
     fillRect(rect(toggleBounds.x, toggleBounds.y, 1, toggleBounds.h), toggleBorderC)
     fillRect(rect(toggleBounds.x + toggleBounds.w - 1, toggleBounds.y, 1, toggleBounds.h), toggleBorderC)
-    # Active side highlight
-    let halfW = toggleW div 2
-    if panel.planMode:
-      fillRect(rect(toggleBounds.x, toggleBounds.y, halfW, toggleBounds.h), accentC)
-    else:
-      fillRect(rect(toggleBounds.x + halfW, toggleBounds.y, toggleW - halfW, toggleBounds.h), accentC)
     # Labels with horizontal padding
     let pad = 4
     let labelY = toggleBounds.y + (toggleBounds.h - fm.lineHeight) div 2
@@ -796,8 +798,9 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
     let buildLabel = "Build"
     let planLabelW = font.measureText(planLabel).w
     let buildLabelW = font.measureText(buildLabel).w
-    let leftLabelColor = if panel.planMode: color(255, 255, 255, 255) else: textMuted
-    let rightLabelColor = if panel.planMode: textMuted else: color(255, 255, 255, 255)
+    let activeLabel = currentTheme.getColor(tcText)
+    let leftLabelColor = if panel.planMode: activeLabel else: textMuted
+    let rightLabelColor = if panel.planMode: textMuted else: activeLabel
     discard font.drawText(toggleBounds.x + pad + (halfW - pad * 2 - planLabelW) div 2, labelY, planLabel, leftLabelColor, color(0, 0, 0, 0))
     discard font.drawText(toggleBounds.x + halfW + pad + (halfW - pad * 2 - buildLabelW) div 2, labelY, buildLabel, rightLabelColor, color(0, 0, 0, 0))
 
@@ -830,6 +833,7 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   fillRect(rect(inputBounds.x, inputBounds.y, inputBounds.w, 1), inputBorderColor)
   fillRect(rect(inputBounds.x, inputBounds.y + inputBounds.h - 1, inputBounds.w, 1), inputBorderColor)
   fillRect(rect(inputBounds.x, inputBounds.y, 1, inputBounds.h), inputBorderColor)
+  fillRect(rect(inputBounds.x + inputBounds.w - 1, inputBounds.y, 1, inputBounds.h), inputBorderColor)
 
   let innerTextW = max(0, inputBounds.w - 16)
   let inputLines = wrapTextToWidth(panel.inputText, font, innerTextW)
