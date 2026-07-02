@@ -781,6 +781,14 @@ proc executeFileOp*(t: AIThread, intent: FileOpIntent): tuple[ok: bool, msg: str
 
 const MaxToolResultChars = 60_000  ## Cap tool output fed back to the model.
 
+proc capToolOutput(output: string; context = "tool output"): string =
+  ## Truncate tool output so it fits back into the model context. Keeps the
+  ## existing truncation pattern consistent across read_file, git_diff, and
+  ## search tools.
+  if output.len <= MaxToolResultChars:
+    return output
+  return output[0..<MaxToolResultChars] & "\n... (truncated; " & context & " is " & $output.len & " bytes)"
+
 proc summarizeToolCall(name: string, args: JsonNode): string =
   ## Short human-readable label shown in the thinking area for a tool call.
   let path = args{"path"}.getStr()
@@ -794,6 +802,12 @@ proc summarizeToolCall(name: string, args: JsonNode): string =
       "Reading " & path
   of "list_directory": "Listing " & path
   of "create_directory": "Creating directory " & path
+  of "search_text":
+    if path.len > 0: "Searching for '" & args{"pattern"}.getStr() & "' in " & path
+    else: "Searching for '" & args{"pattern"}.getStr() & "'"
+  of "find_files":
+    if path.len > 0: "Finding files matching '" & args{"pattern"}.getStr() & "' in " & path
+    else: "Finding files matching '" & args{"pattern"}.getStr() & "'"
   of "write_file": "Writing " & path
   of "edit_file": "Editing " & path
   of "git_status": "Checking git status"
@@ -972,8 +986,74 @@ proc executeBuiltinTool(t: AIThread, name: string, args: JsonNode,
       diff = diff[0..<MaxToolResultChars] & "\n... (diff truncated)"
     return (diff, @[], false, "", "", "")
 
+  of "search_text":
+    let pattern = args{"pattern"}.getStr()
+    if pattern.len == 0: return ("Error: 'pattern' is required.", @[], false, "", "", "")
+    if findExe("rg").len == 0:
+      return ("Error: ripgrep (rg) is not installed; text search is unavailable.", @[], false, "", "", "")
+    var relArg = "."
+    let subPath = args{"path"}.getStr()
+    if subPath.len > 0:
+      let absPath = resolveWorkspacePath(subPath, t.workspaceRoot)
+      if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+        return ("Error: path is outside the workspace.", @[], false, "", "", "")
+      relArg = quoteShell(subPath)
+    let caseSensitive = args{"case_sensitive"}.getBool(false)
+    let isRegex = args{"is_regex"}.getBool(false)
+    var cmd = "rg -n --no-heading --color never"
+    if not caseSensitive: cmd &= " -i"
+    if not isRegex: cmd &= " -F"
+    cmd &= " -- " & quoteShell(pattern) & " " & relArg
+    try:
+      let (output, _) = execCmdEx(cmd, workingDir = t.workspaceRoot)
+      if output.strip().len == 0:
+        return ("(no matches)", @[], false, "", "", "")
+      return (capToolOutput(output), @[], false, "", "", "")
+    except CatchableError as e:
+      return ("Error running search: " & e.msg, @[], false, "", "", "")
+
+  of "find_files":
+    let pattern = args{"pattern"}.getStr()
+    if pattern.len == 0: return ("Error: 'pattern' is required.", @[], false, "", "", "")
+    if findExe("rg").len == 0:
+      return ("Error: ripgrep (rg) is not installed; file search is unavailable.", @[], false, "", "", "")
+    var relArg = "."
+    let subPath = args{"path"}.getStr()
+    if subPath.len > 0:
+      let absPath = resolveWorkspacePath(subPath, t.workspaceRoot)
+      if not isPathInsideWorkspace(absPath, t.workspaceRoot):
+        return ("Error: path is outside the workspace.", @[], false, "", "", "")
+      relArg = quoteShell(subPath)
+    let cmd = "rg --files -g " & quoteShell(pattern) & " " & relArg
+    try:
+      let (output, _) = execCmdEx(cmd, workingDir = t.workspaceRoot)
+      if output.strip().len == 0:
+        return ("(no files matched)", @[], false, "", "", "")
+      return (capToolOutput(output), @[], false, "", "", "")
+    except CatchableError as e:
+      return ("Error finding files: " & e.msg, @[], false, "", "", "")
+
   else:
     return ("Error: unknown tool '" & name & "'.", @[], false, "", "", "")
+
+proc checkCancelled(t: AIThread): bool =
+  ## Non-blocking check for amkCancel or shutdown. Drains a pending cancel from
+  ## reqChan and returns true if the agentic loop should stop. Keeps the same
+  ## semantics as waitForEditConfirmation.
+  if t.shuttingDown.load(moAcquire) or t.reqChan.isClosed:
+    return true
+  var msg: AIMessage
+  if channel_spsc.tryReceive(t.reqChan, msg):
+    case msg.kind
+    of amkShutdown, amkCancel:
+      return true
+    of amkEditConfirm:
+      # Should not arrive here; swallow to avoid confusing the main loop.
+      return false
+    else:
+      # Other request (new message, etc.): let the main loop handle it.
+      return false
+  return false
 
 proc waitForEditConfirmation(t: AIThread): bool =
   ## Check if a pending confirmation has arrived on reqChan.
@@ -1035,9 +1115,14 @@ proc runBuiltinAgentic(t: AIThread, userText: string) =
 
   var finalText = ""
   var errored = false
+  var cancelled = false
   var iterations = 0
   while iterations < MaxAgenticIterations:
     inc iterations
+    # Honour Stop/shutdown requested mid-run, before spending another API call.
+    if t.checkCancelled():
+      cancelled = true
+      break
     let effort = if providerSupportsThinking(provider): t.config.aiReasoningEffort else: ""
     let res = doAgenticChat(t.config, provider, model, messages, t.planMode, effort)
     if res.error.len > 0:
@@ -1056,6 +1141,10 @@ proc runBuiltinAgentic(t: AIThread, userText: string) =
       t.sendResponse(AIMessage(kind: amkThinking, text: res.content))
     messages.add(assistantTurnJson(res))
     for tc in res.toolCalls:
+      # Stop promptly between tools rather than running the whole batch.
+      if t.checkCancelled():
+        cancelled = true
+        break
       t.sendResponse(AIMessage(kind: amkThinking, text: summarizeToolCall(tc.name, tc.arguments)))
       # Pass previewMode=true so destructive tools compute but don't write yet.
       let (toolContent, changed, needsPreview, prevOld, prevNew, prevPath) =
@@ -1097,8 +1186,14 @@ proc runBuiltinAgentic(t: AIThread, userText: string) =
         for cp in changed:
           t.sendResponse(AIMessage(kind: amkFileChanged, text: cp))
         messages.add(%*{"role": "tool", "tool_call_id": tc.id, "content": toolContent})
+    if cancelled:
+      break
 
   if errored:
+    return
+  if cancelled:
+    # Reset the UI's streaming state without persisting a partial turn.
+    t.sendResponse(AIMessage(kind: amkResponseDone))
     return
   if finalText.len == 0:
     finalText = "Reached the tool-call limit (" & $MaxAgenticIterations &

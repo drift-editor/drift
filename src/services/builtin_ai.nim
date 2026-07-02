@@ -505,6 +505,22 @@ proc builtinToolDefs(planMode: bool): seq[tuple[name, description: string, param
       %*{"type": "object",
          "properties": {"path": {"type": "string", "description": "Directory path relative to the workspace root."}},
          "required": ["path"]}),
+    ("search_text", "Search file contents across the workspace for a string or regex (like grep/ripgrep). Returns matching lines as `path:line:text`. Use this to find where a symbol is defined or all the places it is used, instead of opening files one by one.",
+      %*{"type": "object",
+         "properties": {
+           "pattern": {"type": "string", "description": "Text or regular expression to search for."},
+           "path": {"type": "string", "description": "Optional subdirectory or file to limit the search to (relative to the workspace root)."},
+           "is_regex": {"type": "boolean", "description": "Treat the pattern as a regular expression. Default false (literal string)."},
+           "case_sensitive": {"type": "boolean", "description": "Case-sensitive match. Default false."}
+         },
+         "required": ["pattern"]}),
+    ("find_files", "Find files by name or glob pattern across the workspace (e.g. \"*.nim\", \"src/**/*.ts\", \"test_*\"). Returns matching file paths. Use this to locate a file when you don't know its exact path.",
+      %*{"type": "object",
+         "properties": {
+           "pattern": {"type": "string", "description": "Glob pattern to match file paths, e.g. \"*.nim\" or \"src/**/*.ts\"."},
+           "path": {"type": "string", "description": "Optional subdirectory to search under (relative to the workspace root)."}
+         },
+         "required": ["pattern"]}),
     ("git_status", "Show the current git branch and the list of locally changed files (staged, unstaged, untracked). Use this when the user asks to review, summarize, or look at their changes.",
       %*{"type": "object", "properties": {}}),
     ("git_diff", "Show the git diff of local changes. Pass a file path for that file's diff, or omit it for the full working-tree diff.",
