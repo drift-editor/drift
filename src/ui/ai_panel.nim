@@ -73,6 +73,7 @@ type
     x, y, w, h: int
     textColor: Color
     bgColor: Color
+    accentBar: bool
     lines: seq[MdLine]
     thinkingLines: seq[string]
     messageIndex: int
@@ -217,7 +218,9 @@ proc copyMessageAt*(panel: AIPanel, index: int): bool =
   return false
 
 proc bubbleTextColorFor(bg: Color): Color =
-  ## Choose white or near-black text depending on accent luminance.
+  ## Choose white or near-black text depending on background luminance.
+  ## Note: user bubbles now use the primary text color directly, so this helper
+  ## is only relevant for the legacy accent background path if it is re-enabled.
   let r = bg.r.float
   let g = bg.g.float
   let b = bg.b.float
@@ -666,10 +669,11 @@ proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
 proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleLayout] =
   let maxW = bounds.w - MessagePadding * 4
   let fm = font.getFontMetrics()
+  let textC = currentTheme.getColor(tcText)
   var y = MessagePadding
   for i, msg in panel.messages:
     let isUser = msg.role == "user"
-    let bgColor = if isUser: currentTheme.getColor(tcAccent) else: currentTheme.getColor(tcBackground)
+    let bgColor = if isUser: currentTheme.getColor(tcSurfaceHover) else: currentTheme.getColor(tcBackground)
 
     var lines: seq[MdLine]
     var totalH = 0
@@ -726,8 +730,9 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
 
     result.add(BubbleLayout(
       x: bubbleX, y: y, w: bubbleW, h: bubbleH,
-      textColor: bubbleTextColorFor(bgColor),
+      textColor: textC,
       bgColor: bgColor,
+      accentBar: isUser,
       lines: lines,
       thinkingLines: thinkingLines,
       messageIndex: i
@@ -832,6 +837,8 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
       fillRect(rect(bubble.x, drawY + bubble.h - 1, bubble.w, 1), borderC)
       fillRect(rect(bubble.x, drawY, 1, bubble.h), borderC)
       fillRect(rect(bubble.x + bubble.w - 1, drawY, 1, bubble.h), borderC)
+      if bubble.accentBar:
+        fillRect(rect(bubble.x + bubble.w - 4, drawY + 4, 3, bubble.h - 8), accentC)
 
       let isUser = panel.messages[bubble.messageIndex].role == "user"
       var lineY = drawY + MessagePadding
