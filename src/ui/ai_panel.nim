@@ -718,7 +718,7 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
         totalH += fm.lineHeight
 
     let bubbleH = totalH + MessagePadding * 2
-    let bubbleW = bounds.w - MessagePadding * 2
+    let bubbleW = maxW + MessagePadding * 2
     let bubbleX = if isUser:
       bounds.x + bounds.w - bubbleW - MessagePadding
     else:
