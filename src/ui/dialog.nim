@@ -208,20 +208,21 @@ proc render*(dialog: Dialog, viewportW, viewportH: int) =
   for btn in dialog.buttons:
     let btnBounds = rect(buttonX, buttonY, ButtonWidth, ButtonHeight)
 
-    let bgColor = if btn.isDefault:
-      currentTheme.getColor(tcAccent)
-    else:
-      currentTheme.getColor(tcSurfaceHover)
+    let bgColor = currentTheme.getColor(tcSurfaceHover)
     fillRect(btnBounds, bgColor)
 
-    # Button border
-    fillRect(rect(btnBounds.x,     btnBounds.y,      btnBounds.w, 1), currentTheme.getColor(tcBorder))
-    fillRect(rect(btnBounds.x,     btnBounds.y + btnBounds.h - 1, btnBounds.w, 1), currentTheme.getColor(tcBorder))
-    fillRect(rect(btnBounds.x,     btnBounds.y,      1, btnBounds.h), currentTheme.getColor(tcBorder))
-    fillRect(rect(btnBounds.x + btnBounds.w - 1, btnBounds.y, 1, btnBounds.h), currentTheme.getColor(tcBorder))
+    # Button border: accent for the default action, neutral otherwise.
+    let borderColor = if btn.isDefault:
+      currentTheme.getColor(tcAccent)
+    else:
+      currentTheme.getColor(tcBorder)
+    fillRect(rect(btnBounds.x,     btnBounds.y,      btnBounds.w, 1), borderColor)
+    fillRect(rect(btnBounds.x,     btnBounds.y + btnBounds.h - 1, btnBounds.w, 1), borderColor)
+    fillRect(rect(btnBounds.x,     btnBounds.y,      1, btnBounds.h), borderColor)
+    fillRect(rect(btnBounds.x + btnBounds.w - 1, btnBounds.y, 1, btnBounds.h), borderColor)
 
     let textColor = if btn.isDefault:
-      currentTheme.getColor(tcBackground)
+      currentTheme.getColor(tcAccent)
     else:
       currentTheme.getColor(tcText)
 
