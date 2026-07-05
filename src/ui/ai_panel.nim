@@ -228,10 +228,14 @@ proc bubbleTextColorFor(bg: Color): Color =
     color(255, 255, 255, 255)
 
 proc wrapTextToWidth(text: string, font: Font, maxW: int): seq[string] =
-  if text.len == 0:
-    return @[]
   if maxW <= 0:
+    # Can't wrap at all — return full text so nothing is lost; the caller
+    # should clip at the rendering stage to prevent visual overflow.
     return @[text]
+  if text.len == 0:
+    # Preserve a single empty line so code-blocks with blank lines keep
+    # the correct vertical spacing in the bubble layout.
+    return @[""]
   var lines: seq[string]
   for rawLine in text.split('\n'):
     var currentLine = ""
@@ -839,11 +843,11 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
         let lineX = bubble.x + MessagePadding + line.indent
         if line.isRule:
           let ruleY = lineY + fm.lineHeight div 2
-          fillRect(rect(lineX, ruleY, bubble.w - MessagePadding * 2 - line.indent, 1), borderC)
+          fillRect(rect(lineX, ruleY, max(0, bubble.w - MessagePadding * 2 - line.indent), 1), borderC)
           lineY += fm.lineHeight
           continue
         if line.codeBg:
-          let bgW = bubble.w - MessagePadding * 2 - line.indent
+          let bgW = max(0, bubble.w - MessagePadding * 2 - line.indent)
           fillRect(rect(lineX, lineY, bgW, fm.lineHeight), bgHover)
         if line.leftBar:
           fillRect(rect(lineX, lineY, 3, fm.lineHeight), textMuted)
