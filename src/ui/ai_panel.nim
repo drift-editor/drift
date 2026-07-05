@@ -82,6 +82,8 @@ type
     messages*: seq[ChatMessage]
     inputText*: string
     cursorPos*: int
+    selectionStart*: int
+    selectionEnd*: int
     scrollOffset*: int
     focused*: bool
     isStreaming*: bool
@@ -116,6 +118,8 @@ proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
     messages: @[],
     inputText: "",
     cursorPos: 0,
+    selectionStart: 0,
+    selectionEnd: 0,
     scrollOffset: 0,
     focused: false,
     isStreaming: false,
@@ -154,6 +158,8 @@ proc sendCurrentMessage*(panel: AIPanel) =
     panel.messages.delete(0)
   panel.inputText = ""
   panel.cursorPos = 0
+  panel.selectionStart = 0
+  panel.selectionEnd = 0
   panel.cursorVisible = true
   panel.lastBlinkTick = getTicks()
   # Only auto-scroll to the new message if the user is already near the bottom.
@@ -169,6 +175,8 @@ proc clearChat*(panel: AIPanel) =
   panel.isStreaming = false
   panel.inputText = ""
   panel.cursorPos = 0
+  panel.selectionStart = 0
+  panel.selectionEnd = 0
   panel.userScrolledUp = false
   panel.rightClickedMessageIndex = -1
 
@@ -349,6 +357,56 @@ proc wrapMdSegments(segments: seq[MdSegment], font: Font, maxW: int): seq[MdLine
   flushLine()
   result = lines
 
+proc selectionVisualSpans(text: string, selStart: int, selEnd: int, font: Font, maxW: int): seq[tuple[line: int, x: int, w: int]] =
+  ## Compute wrapped-line spans that make up the selected text range.
+  ## Returns a per-visual-line (lineIndex, xOffset, width) tuple sequence.
+  if selStart >= selEnd:
+    return
+  var charIdx = 0
+  var lineIdx = 0
+  for rawLine in text.split('\n'):
+    var currentLine = ""
+    let words = rawLine.split(' ')
+    for word in words:
+      let spacePrefix = if currentLine.len > 0: " " else: ""
+      let test = currentLine & spacePrefix & word
+      if font.measureText(test).w > maxW and currentLine.len > 0:
+        let lineStart = charIdx
+        let lineEnd = charIdx + currentLine.len
+        if selStart < lineEnd and selEnd > lineStart:
+          let s = max(selStart, lineStart)
+          let e = min(selEnd, lineEnd)
+          let x0 = font.measureText(currentLine[0 ..< s - lineStart]).w
+          let x1 = font.measureText(currentLine[0 ..< e - lineStart]).w
+          result.add((lineIdx, x0, x1 - x0))
+        charIdx += currentLine.len
+        if charIdx < text.len and text[charIdx] == ' ':
+          charIdx += 1
+        lineIdx += 1
+        currentLine = word
+      else:
+        currentLine = test
+    # End of raw line
+    let lineStart = charIdx
+    let lineEnd = charIdx + currentLine.len
+    if selStart < lineEnd and selEnd > lineStart:
+      let s = max(selStart, lineStart)
+      let e = min(selEnd, lineEnd)
+      let x0 = font.measureText(currentLine[0 ..< s - lineStart]).w
+      let x1 = font.measureText(currentLine[0 ..< e - lineStart]).w
+      result.add((lineIdx, x0, x1 - x0))
+    charIdx += currentLine.len
+    if charIdx < text.len and text[charIdx] == '\n':
+      charIdx += 1
+    lineIdx += 1
+  # Selection may extend past the last wrapped word; if so, fill out to the end of
+  # the final visual line.
+  let allLines = wrapTextToWidth(text, font, maxW)
+  if charIdx < selEnd and allLines.len > 0:
+    let last = allLines[^1]
+    let x0 = if selStart > charIdx: font.measureText(last[0 ..< selStart - charIdx]).w else: 0
+    result.add((allLines.len - 1, x0, font.measureText(last[x0 div 1 .. last.len - 1]).w))
+
 proc cursorVisualPos(text: string, cursorPos: int, font: Font, maxW: int): tuple[line: int, x: int] =
   ## Compute which wrapped line the cursor is on and its x offset.
   if cursorPos <= 0:
@@ -417,7 +475,24 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
       panel.focused = false
       return true
     return false
+  of KeyA:
+    let selectMod = when defined(macosx): GuiPressed else: CtrlPressed
+    if selectMod in e.mods:
+      panel.selectionStart = 0
+      panel.selectionEnd = panel.inputText.len
+      panel.cursorPos = panel.inputText.len
+      panel.cursorVisible = true
+      panel.lastBlinkTick = getTicks()
+      return true
   of KeyBackspace:
+    if panel.selectionStart < panel.selectionEnd:
+      panel.inputText = panel.inputText[0..<panel.selectionStart] & panel.inputText[panel.selectionEnd..^1]
+      panel.cursorPos = panel.selectionStart
+      panel.selectionStart = panel.cursorPos
+      panel.selectionEnd = panel.cursorPos
+      panel.cursorVisible = true
+      panel.lastBlinkTick = getTicks()
+      return true
     if panel.cursorPos > 0:
       let start = prevRuneBoundary(panel.inputText, panel.cursorPos)
       panel.inputText = panel.inputText[0..<start] & panel.inputText[panel.cursorPos..^1]
@@ -426,6 +501,14 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
       panel.lastBlinkTick = getTicks()
       return true
   of KeyDelete:
+    if panel.selectionStart < panel.selectionEnd:
+      panel.inputText = panel.inputText[0..<panel.selectionStart] & panel.inputText[panel.selectionEnd..^1]
+      panel.cursorPos = panel.selectionStart
+      panel.selectionStart = panel.cursorPos
+      panel.selectionEnd = panel.cursorPos
+      panel.cursorVisible = true
+      panel.lastBlinkTick = getTicks()
+      return true
     if panel.cursorPos < panel.inputText.len:
       let endPos = nextRuneBoundary(panel.inputText, panel.cursorPos)
       panel.inputText = panel.inputText[0..<panel.cursorPos] & panel.inputText[endPos..^1]
@@ -433,12 +516,26 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
       panel.lastBlinkTick = getTicks()
       return true
   of KeyLeft:
+    if panel.selectionStart < panel.selectionEnd:
+      panel.cursorPos = panel.selectionStart
+      panel.selectionStart = panel.cursorPos
+      panel.selectionEnd = panel.cursorPos
+      panel.cursorVisible = true
+      panel.lastBlinkTick = getTicks()
+      return true
     if panel.cursorPos > 0:
       panel.cursorPos = prevRuneBoundary(panel.inputText, panel.cursorPos)
       panel.cursorVisible = true
       panel.lastBlinkTick = getTicks()
       return true
   of KeyRight:
+    if panel.selectionStart < panel.selectionEnd:
+      panel.cursorPos = panel.selectionEnd
+      panel.selectionStart = panel.cursorPos
+      panel.selectionEnd = panel.cursorPos
+      panel.cursorVisible = true
+      panel.lastBlinkTick = getTicks()
+      return true
     if panel.cursorPos < panel.inputText.len:
       panel.cursorPos = nextRuneBoundary(panel.inputText, panel.cursorPos)
       panel.cursorVisible = true
@@ -446,11 +543,15 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
       return true
   of KeyHome:
     panel.cursorPos = 0
+    panel.selectionStart = 0
+    panel.selectionEnd = 0
     panel.cursorVisible = true
     panel.lastBlinkTick = getTicks()
     return true
   of KeyEnd:
     panel.cursorPos = panel.inputText.len
+    panel.selectionStart = 0
+    panel.selectionEnd = 0
     panel.cursorVisible = true
     panel.lastBlinkTick = getTicks()
     return true
@@ -482,6 +583,20 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
     if copyMod in e.mods and ShiftPressed in e.mods:
       discard panel.copyLastAssistantMessage()
       return true
+    if copyMod in e.mods and panel.selectionStart < panel.selectionEnd:
+      putClipboardText(panel.inputText[panel.selectionStart ..< panel.selectionEnd])
+      return true
+  of KeyX:
+    let cutMod = when defined(macosx): GuiPressed else: CtrlPressed
+    if cutMod in e.mods and panel.selectionStart < panel.selectionEnd:
+      putClipboardText(panel.inputText[panel.selectionStart ..< panel.selectionEnd])
+      panel.inputText = panel.inputText[0..<panel.selectionStart] & panel.inputText[panel.selectionEnd..^1]
+      panel.cursorPos = panel.selectionStart
+      panel.selectionStart = panel.cursorPos
+      panel.selectionEnd = panel.cursorPos
+      panel.cursorVisible = true
+      panel.lastBlinkTick = getTicks()
+      return true
   of KeyPeriod:
     if CtrlPressed in e.mods and panel.isStreaming:
       if panel.onStop != nil:
@@ -490,6 +605,21 @@ proc handleKey*(panel: AIPanel, e: Event): bool =
   else:
     discard
   false
+
+proc replaceSelection(panel: AIPanel, text: string) =
+  if panel.selectionStart < panel.selectionEnd:
+    panel.inputText = panel.inputText[0..<panel.selectionStart] & text & panel.inputText[panel.selectionEnd..^1]
+    panel.cursorPos = panel.selectionStart + text.len
+  else:
+    if panel.cursorPos < panel.inputText.len:
+      panel.inputText = panel.inputText[0..<panel.cursorPos] & text & panel.inputText[panel.cursorPos..^1]
+    else:
+      panel.inputText.add(text)
+    panel.cursorPos = panel.cursorPos + text.len
+  panel.selectionStart = panel.cursorPos
+  panel.selectionEnd = panel.cursorPos
+  panel.cursorVisible = true
+  panel.lastBlinkTick = getTicks()
 
 proc handlePasteViaTextInput*(panel: AIPanel, text: string): bool =
   ## Handle paste from the OS clipboard, typically delivered as a TextInput event
@@ -508,13 +638,7 @@ proc handlePasteViaTextInput*(panel: AIPanel, text: string): bool =
   # Enforce input length limit
   if panel.inputText.len + cleanText.len > MaxInputLen:
     cleanText = cleanText[0 ..< (MaxInputLen - panel.inputText.len)]
-  if panel.cursorPos < panel.inputText.len:
-    panel.inputText = panel.inputText[0..<panel.cursorPos] & cleanText & panel.inputText[panel.cursorPos..^1]
-  else:
-    panel.inputText.add(cleanText)
-  panel.cursorPos += cleanText.len
-  panel.cursorVisible = true
-  panel.lastBlinkTick = getTicks()
+  panel.replaceSelection(cleanText)
   return true
 
 proc handleTextInput*(panel: AIPanel, e: Event): bool =
@@ -539,13 +663,7 @@ proc handleTextInput*(panel: AIPanel, e: Event): bool =
   # Enforce input length limit to prevent pathological input.
   if panel.inputText.len + text.len > MaxInputLen:
     return false
-  if panel.cursorPos < panel.inputText.len:
-    panel.inputText = panel.inputText[0..<panel.cursorPos] & text & panel.inputText[panel.cursorPos..^1]
-  else:
-    panel.inputText.add(text)
-  panel.cursorPos += text.len
-  panel.cursorVisible = true
-  panel.lastBlinkTick = getTicks()
+  panel.replaceSelection(text)
   return true
 
 proc handleMouse*(panel: AIPanel, e: Event, bounds: Rect): bool =
@@ -997,6 +1115,15 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   if panel.inputText.len == 0:
     discard font.drawText(inputBounds.x + 8, inputBounds.y + 8, panel.placeholder, textMuted, color(0, 0, 0, 0))
   else:
+    # Selection highlight behind text
+    if panel.focused and panel.selectionStart < panel.selectionEnd:
+      let selColor = currentTheme.getColor(tcSelection)
+      let selBg = color(selColor.r, selColor.g, selColor.b, 120)
+      let spans = selectionVisualSpans(panel.inputText, panel.selectionStart, panel.selectionEnd, font, innerTextW)
+      for span in spans:
+        let sx = inputBounds.x + 8 + span.x
+        let sy = inputBounds.y + 8 + span.line * fm.lineHeight
+        fillRect(rect(sx, sy, max(2, span.w), fm.lineHeight), selBg)
     var lineY = inputBounds.y + 8
     for line in inputLines:
       discard font.drawText(inputBounds.x + 8, lineY, line, textC, color(0, 0, 0, 0))
