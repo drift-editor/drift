@@ -6,6 +6,7 @@ import uirelays
 import uirelays/screen
 import uirelays/input
 import theme, icons
+import ../utils/md_segments
 
 const
   HeaderHeight = 32
@@ -52,12 +53,27 @@ type
     role*: string
     content*: string
     thinking*: string   ## Reasoning/thinking content, shown separately (muted)
+    segments*: seq[MdSegment]  ## Cached parsed markdown segments for assistant messages.
+
+  MdChunk = object
+    kind: MdSegmentKind
+    text: string
+    url: string
+
+  MdLine = object
+    chunks: seq[MdChunk]
+    level: int
+    prefix: string
+    indent: int
+    codeBg: bool
+    leftBar: bool
+    isRule: bool
 
   BubbleLayout = object
     x, y, w, h: int
     textColor: Color
     bgColor: Color
-    wrappedLines: seq[string]
+    lines: seq[MdLine]
     thinkingLines: seq[string]
     messageIndex: int
 
@@ -158,9 +174,10 @@ proc clearChat*(panel: AIPanel) =
 proc appendText*(panel: AIPanel, chunk: string) =
   panel.isStreaming = true
   if panel.messages.len == 0 or panel.messages[^1].role != "assistant":
-    panel.messages.add(ChatMessage(role: "assistant", content: chunk))
+    panel.messages.add(ChatMessage(role: "assistant", content: chunk, segments: markdownToSegments(chunk)))
   else:
     panel.messages[^1].content &= chunk
+    panel.messages[^1].segments = markdownToSegments(panel.messages[^1].content)
   if not panel.userScrolledUp:
     panel.scrollOffset = high(int)  ## Will be clamped to bottom during render
 
@@ -244,6 +261,85 @@ proc wrapTextToWidth(text: string, font: Font, maxW: int): seq[string] =
       lines.add(currentLine)
     elif rawLine.len == 0:
       lines.add("")
+  result = lines
+
+proc wrapMdSegments(segments: seq[MdSegment], font: Font, maxW: int): seq[MdLine] =
+  ## Flatten markdown segments into visual lines that fit inside maxW.
+  ## Block-level elements (headings, code blocks, lists, quotes) get their own
+  ## styled line(s); inline elements are accumulated and wrapped together.
+  if maxW <= 0:
+    return @[]
+
+  var lines: seq[MdLine]
+  var currentLine = MdLine()
+  var currentLineText = ""
+
+  proc flushLine() =
+    if currentLine.chunks.len > 0 or currentLine.isRule:
+      lines.add(currentLine)
+    currentLine = MdLine()
+    currentLineText = ""
+
+  proc appendInlineChunk(kind: MdSegmentKind; text, url: string) =
+    var remaining = text
+    while remaining.len > 0:
+      let candidate = currentLineText & remaining
+      let candidateW = font.measureText(candidate).w
+      if candidateW <= maxW or currentLineText.len == 0:
+        currentLine.chunks.add(MdChunk(kind: kind, text: remaining, url: url))
+        currentLineText = candidate
+        remaining = ""
+      else:
+        if currentLineText.len > 0:
+          flushLine()
+        else:
+          # Single segment is too wide; hard-break it by character.
+          var cut = remaining.len
+          while cut > 1 and font.measureText(remaining[0..<cut]).w > maxW:
+            dec cut
+          if cut < 1: cut = 1
+          currentLine.chunks.add(MdChunk(kind: kind, text: remaining[0..<cut], url: url))
+          currentLineText = remaining[0..<cut]
+          flushLine()
+          remaining = remaining[cut..^1]
+
+  for s in segments:
+    case s.kind
+    of mskBreak:
+      flushLine()
+    of mskRule:
+      flushLine()
+      lines.add(MdLine(isRule: true))
+    of mskHeading:
+      flushLine()
+      for line in wrapTextToWidth(s.text, font, maxW):
+        var l = MdLine(level: s.level)
+        l.chunks.add(MdChunk(kind: mskHeading, text: line))
+        lines.add(l)
+    of mskCodeBlock:
+      flushLine()
+      for line in wrapTextToWidth(s.text, font, maxW):
+        var l = MdLine(codeBg: true)
+        l.chunks.add(MdChunk(kind: mskCodeBlock, text: line))
+        lines.add(l)
+    of mskBlockquote:
+      flushLine()
+      let indent = max(0, s.level) * 12
+      for line in wrapTextToWidth(s.text, font, max(8, maxW - indent)):
+        var l = MdLine(leftBar: true, indent: indent)
+        l.chunks.add(MdChunk(kind: mskBlockquote, text: line))
+        lines.add(l)
+    of mskListItem:
+      flushLine()
+      let indent = max(0, s.level) * 12
+      for line in wrapTextToWidth(s.text, font, max(8, maxW - indent)):
+        var l = MdLine(indent: indent)
+        l.chunks.add(MdChunk(kind: mskListItem, text: line))
+        lines.add(l)
+    of mskText, mskStrong, mskEm, mskCode, mskLink:
+      appendInlineChunk(s.kind, s.text, s.url)
+
+  flushLine()
   result = lines
 
 proc cursorVisualPos(text: string, cursorPos: int, font: Font, maxW: int): tuple[line: int, x: int] =
@@ -571,7 +667,7 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
     let isUser = msg.role == "user"
     let bgColor = if isUser: currentTheme.getColor(tcAccent) else: currentTheme.getColor(tcBackground)
 
-    var wrappedLines: seq[string]
+    var lines: seq[MdLine]
     var totalH = 0
     # Thinking section (assistant only): shown as muted, prefixed with a label.
     var thinkingLines: seq[string]
@@ -584,11 +680,25 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
       # A blank separator line between thinking and the response.
       thinkingLines.add("")
       totalH += fm.lineHeight
-    # Main content (use the shared wrapper that hard-breaks long words).
+    # Main content: assistant messages render parsed markdown segments; user
+    # messages stay plain so bubbleTextColor applies uniformly.
     if msg.content.len > 0:
-      for wl in wrapTextToWidth(msg.content, font, maxW):
-        wrappedLines.add(wl)
-        totalH += fm.lineHeight
+      if isUser:
+        for wl in wrapTextToWidth(msg.content, font, maxW):
+          var line = MdLine()
+          line.chunks.add(MdChunk(kind: mskText, text: wl))
+          lines.add(line)
+          totalH += fm.lineHeight
+      elif msg.segments.len > 0:
+        for line in wrapMdSegments(msg.segments, font, maxW):
+          lines.add(line)
+          totalH += fm.lineHeight
+      else:
+        for wl in wrapTextToWidth(msg.content, font, maxW):
+          var line = MdLine()
+          line.chunks.add(MdChunk(kind: mskText, text: wl))
+          lines.add(line)
+          totalH += fm.lineHeight
     elif isUser:
       # A user message always has content; guard against empty.
       discard
@@ -598,7 +708,9 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
       if thinkingLines.len > 0 and msg.content.len == 0 and panel.isStreaming:
         discard  # thinking already gives height
       else:
-        wrappedLines.add("")
+        var line = MdLine()
+        line.chunks.add(MdChunk(kind: mskText, text: ""))
+        lines.add(line)
         totalH += fm.lineHeight
 
     let bubbleH = totalH + MessagePadding * 2
@@ -612,7 +724,7 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
       x: bubbleX, y: y, w: bubbleW, h: bubbleH,
       textColor: bubbleTextColorFor(bgColor),
       bgColor: bgColor,
-      wrappedLines: wrappedLines,
+      lines: lines,
       thinkingLines: thinkingLines,
       messageIndex: i
     ))
@@ -630,6 +742,19 @@ proc messageIndexAt*(panel: AIPanel, y: int, font: Font, bounds: Rect): int =
     if contentY >= bubble.y and contentY < bubble.y + bubble.h:
       return bubble.messageIndex
   return -1
+
+proc chunkColor(kind: MdSegmentKind; isUser: bool; bubbleTextColor, textMuted, accentC: Color): Color =
+  ## Choose a render color for a markdown chunk. User bubbles keep a single
+  ## color so the accent background stays readable.
+  if isUser:
+    return bubbleTextColor
+  case kind
+  of mskStrong, mskHeading, mskLink:
+    return accentC
+  of mskEm, mskBlockquote:
+    return textMuted
+  else:
+    return bubbleTextColor
 
 proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   let bg = currentTheme.getColor(tcSurface)
@@ -704,13 +829,32 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
       fillRect(rect(bubble.x, drawY, 1, bubble.h), borderC)
       fillRect(rect(bubble.x + bubble.w - 1, drawY, 1, bubble.h), borderC)
 
+      let isUser = panel.messages[bubble.messageIndex].role == "user"
       var lineY = drawY + MessagePadding
       # Thinking section: rendered first, in muted color.
       for line in bubble.thinkingLines:
         discard font.drawText(bubble.x + MessagePadding, lineY, line, textMuted, color(0, 0, 0, 0))
         lineY += fm.lineHeight
-      for line in bubble.wrappedLines:
-        discard font.drawText(bubble.x + MessagePadding, lineY, line, bubble.textColor, color(0, 0, 0, 0))
+      for line in bubble.lines:
+        let lineX = bubble.x + MessagePadding + line.indent
+        if line.isRule:
+          let ruleY = lineY + fm.lineHeight div 2
+          fillRect(rect(lineX, ruleY, bubble.w - MessagePadding * 2 - line.indent, 1), borderC)
+          lineY += fm.lineHeight
+          continue
+        if line.codeBg:
+          let bgW = bubble.w - MessagePadding * 2 - line.indent
+          fillRect(rect(lineX, lineY, bgW, fm.lineHeight), bgHover)
+        if line.leftBar:
+          fillRect(rect(lineX, lineY, 3, fm.lineHeight), textMuted)
+        var chunkX = lineX + (if line.leftBar: 8 else: 0)
+        for chunk in line.chunks:
+          let c = chunkColor(chunk.kind, isUser, bubble.textColor, textMuted, accentC)
+          if chunk.kind == mskCode and not line.codeBg:
+            let cw = font.measureText(chunk.text).w
+            fillRect(rect(chunkX, lineY, cw, fm.lineHeight), bgHover)
+          discard font.drawText(chunkX, lineY, chunk.text, c, color(0, 0, 0, 0))
+          chunkX += font.measureText(chunk.text).w
         lineY += fm.lineHeight
 
   # Streaming indicator: animated braille spinner that cycles over time.
