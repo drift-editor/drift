@@ -14,6 +14,7 @@ type
     dmkScopes
     dmkVariables
     dmkEvaluate
+    dmkSetVariable
     dmkContinue
     dmkNext
     dmkStepIn
@@ -31,6 +32,7 @@ type
     dmkScopesResponse
     dmkVariablesResponse
     dmkEvaluateResponse
+    dmkSetVariableResponse
 
   DAPMessage* = object
     kind*: DAPMessageKind
@@ -98,10 +100,12 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
       var scopesFuture: Future[JsonNode] = nil
       var variablesFuture: Future[JsonNode] = nil
       var evaluateFuture: Future[JsonNode] = nil
+      var setVariableFuture: Future[JsonNode] = nil
       var stackTraceRequestMeta: Option[DAPMessage] = none(DAPMessage)
       var scopesRequestMeta: Option[DAPMessage] = none(DAPMessage)
       var variablesRequestMeta: Option[DAPMessage] = none(DAPMessage)
       var evaluateRequestMeta: Option[DAPMessage] = none(DAPMessage)
+      var setVariableRequestMeta: Option[DAPMessage] = none(DAPMessage)
       var idleCount = 0
       const FastSleepMs = 1
       const SlowSleepMs = 16
@@ -127,6 +131,7 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
           var lastScopes: Option[DAPMessage] = none(DAPMessage)
           var lastVariables: Option[DAPMessage] = none(DAPMessage)
           var lastEvaluate: Option[DAPMessage] = none(DAPMessage)
+          var lastSetVariable: Option[DAPMessage] = none(DAPMessage)
           var lastContinue: Option[DAPMessage] = none(DAPMessage)
           var lastNext: Option[DAPMessage] = none(DAPMessage)
           var lastStepIn: Option[DAPMessage] = none(DAPMessage)
@@ -144,6 +149,7 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
             of dmkScopes: lastScopes = some(m)
             of dmkVariables: lastVariables = some(m)
             of dmkEvaluate: lastEvaluate = some(m)
+            of dmkSetVariable: lastSetVariable = some(m)
             of dmkContinue: lastContinue = some(m)
             of dmkNext: lastNext = some(m)
             of dmkStepIn: lastStepIn = some(m)
@@ -183,6 +189,10 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
             let ev = lastEvaluate.get()
             evaluateFuture = requestEvaluate(client, ev.str1)
             evaluateRequestMeta = some(ev)
+          if running and lastSetVariable.isSome:
+            let sv = lastSetVariable.get()
+            setVariableFuture = setVariableAsync(client, sv.int1, sv.str1, sv.str2)
+            setVariableRequestMeta = some(sv)
           if running and lastContinue.isSome and client.isStopped:
             let c = lastContinue.get()
             asyncSpawn requestContinue(client, c.int1)
@@ -252,6 +262,20 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
           ))
           evaluateFuture = nil
           evaluateRequestMeta = none(DAPMessage)
+
+        if setVariableFuture != nil and setVariableFuture.finished:
+          hadFlushWork = true
+          let resp = setVariableFuture.read()
+          let reqMeta = if setVariableRequestMeta.isSome: setVariableRequestMeta.get() else: DAPMessage(kind: dmkSetVariable)
+          t.sendResponse(DAPMessage(
+            kind: dmkSetVariableResponse,
+            int1: reqMeta.int1,
+            str1: reqMeta.str1,
+            str2: reqMeta.str2,
+            jsonData: resp
+          ))
+          setVariableFuture = nil
+          setVariableRequestMeta = none(DAPMessage)
 
         if stoppedBuffer.len > 0 or outputBuffer.len > 0 or terminatedBuffer.len > 0:
           hadFlushWork = true
@@ -335,6 +359,9 @@ proc requestPause*(t: DAPThread; threadId: int) =
 
 proc requestDisconnect*(t: DAPThread) =
   t.queueRequest(DAPMessage(kind: dmkDisconnect))
+
+proc requestSetVariable*(t: DAPThread; variablesReference: int; name: string; value: string) =
+  t.queueRequest(DAPMessage(kind: dmkSetVariable, int1: variablesReference, str1: name, str2: value))
 
 proc shutdown*(t: DAPThread) =
   if not channel_spsc.trySend(t.reqChan, DAPMessage(kind: dmkShutdown)):

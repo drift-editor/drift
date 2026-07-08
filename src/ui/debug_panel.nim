@@ -21,6 +21,8 @@ type
     value*: string
     typeName*: string
     variablesReference*: int
+    parentReference*: int
+    evaluateName*: string
     children*: seq[DebugTreeNode]
     expanded*: bool
     loading*: bool
@@ -34,12 +36,17 @@ type
     varScrollOffset*: int
     hoverStackRow*: int
     hoverVarRow*: int
+    selectedVarNode*: DebugTreeNode
+    lastClickTime*: int
+    lastClickRow*: int
     inputText*: string
     inputFocused*: bool
     inputCursorPos*: int
     onNavigate*: proc(path: string; line, col: int)
     onVariablesRequest*: proc(variablesReference: int)
     onEvaluate*: proc(expression: string)
+    onEditVariableRequest*: proc(node: DebugTreeNode)
+    onSetVariable*: proc(variablesReference: int; name: string; value: string)
     onInputFocus*: proc()
 
 # Panel lifecycle
@@ -54,12 +61,17 @@ proc newDebugPanel*(): DebugPanel =
     varScrollOffset: 0,
     hoverStackRow: -1,
     hoverVarRow: -1,
+    selectedVarNode: nil,
+    lastClickTime: 0,
+    lastClickRow: -1,
     inputText: "",
     inputFocused: false,
     inputCursorPos: 0,
     onNavigate: nil,
     onVariablesRequest: nil,
     onEvaluate: nil,
+    onEditVariableRequest: nil,
+    onSetVariable: nil,
     onInputFocus: nil
   )
 
@@ -72,6 +84,9 @@ proc clear*(panel: DebugPanel) =
   panel.varScrollOffset = 0
   panel.hoverStackRow = -1
   panel.hoverVarRow = -1
+  panel.selectedVarNode = nil
+  panel.lastClickTime = 0
+  panel.lastClickRow = -1
   panel.inputText = ""
   panel.inputFocused = false
   panel.inputCursorPos = 0
@@ -112,10 +127,23 @@ proc submitInput*(panel: DebugPanel) =
   if panel.onEvaluate != nil:
     panel.onEvaluate(expr)
 
+proc canEditVariable*(node: DebugTreeNode): bool =
+  node != nil and node.parentReference > 0 and node.name.len > 0
+
+proc startEditingVariable*(panel: DebugPanel; node: DebugTreeNode) =
+  if not node.canEditVariable:
+    return
+  panel.selectedVarNode = node
+  if panel.onEditVariableRequest != nil:
+    panel.onEditVariableRequest(node)
+
 proc handleKey*(panel: DebugPanel; e: Event): bool =
   if e.kind != KeyDownEvent:
     return false
   if not panel.inputFocused:
+    if e.key == KeyEnter and panel.selectedVarNode != nil and canEditVariable(panel.selectedVarNode):
+      panel.startEditingVariable(panel.selectedVarNode)
+      return true
     return false
 
   case e.key
@@ -191,6 +219,15 @@ proc clearVariables*(panel: DebugPanel) =
   panel.varNodes = @[]
   panel.varScrollOffset = 0
   panel.hoverVarRow = -1
+  panel.selectedVarNode = nil
+
+proc confirmSetVariable*(panel: DebugPanel; value: string) =
+  ## Called by the app after the input dialog is confirmed; fires onSetVariable.
+  if panel.selectedVarNode == nil or not panel.selectedVarNode.canEditVariable:
+    return
+  let node = panel.selectedVarNode
+  if panel.onSetVariable != nil:
+    panel.onSetVariable(node.parentReference, node.name, value)
 
 proc addScopes*(panel: DebugPanel; scopes: seq[Scope]) =
   for s in scopes:
@@ -199,6 +236,8 @@ proc addScopes*(panel: DebugPanel; scopes: seq[Scope]) =
       value: "",
       typeName: "",
       variablesReference: s.variablesReference,
+      parentReference: 0,
+      evaluateName: "",
       children: @[],
       expanded: false,
       loading: false
@@ -225,6 +264,8 @@ proc addVariables*(panel: DebugPanel; variablesReference: int; variables: seq[De
       value: v.value,
       typeName: v.typeName,
       variablesReference: v.variablesReference,
+      parentReference: variablesReference,
+      evaluateName: v.evaluateName,
       children: @[],
       expanded: false,
       loading: false
@@ -487,6 +528,14 @@ proc handleMouse*(panel: DebugPanel; e: Event; bounds: Rect): bool =
     of MouseDownEvent:
       if rowIdx >= 0 and rowIdx < flatVars.len:
         let (node, _) = flatVars[rowIdx]
+        panel.selectedVarNode = node
+        let now = getTicks()
+        let isDoubleClick = (now - panel.lastClickTime < 400) and (panel.lastClickRow == rowIdx)
+        panel.lastClickTime = now
+        panel.lastClickRow = rowIdx
+        if isDoubleClick and node.canEditVariable:
+          panel.startEditingVariable(node)
+          return true
         if node.canExpand:
           if node.expanded:
             node.expanded = false

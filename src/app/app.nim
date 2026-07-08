@@ -1979,6 +1979,20 @@ proc init*(app: App) =
       app.dapThread.requestEvaluate(expression)
     else:
       app.debugPanel.addOutput("Debug session not ready")
+  app.debugPanel.onEditVariableRequest = proc(node: DebugTreeNode) =
+    app.inputDialog.title = "Set Variable"
+    app.inputDialog.prompt = "New value for " & node.name & ":"
+    app.inputDialog.text = node.value
+    app.inputDialog.centerOnScreen(app.width, app.height)
+    app.inputDialog.onResult = proc(confirmed: bool, text: string) =
+      if confirmed:
+        app.debugPanel.confirmSetVariable(text)
+    app.inputDialog.show()
+  app.debugPanel.onSetVariable = proc(variablesReference: int; name: string; value: string) =
+    if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
+      app.dapThread.requestSetVariable(variablesReference, name, value)
+    else:
+      app.debugPanel.addOutput("Debug session not ready")
   app.debugPanel.onInputFocus = proc() =
     app.focus = "debugPanel"
 
@@ -3401,6 +3415,14 @@ proc run*(app: App) =
       of dmkVariablesResponse:
         let variables = parseVariables(resp.jsonData)
         app.debugPanel.addVariables(resp.int1, variables)
+      of dmkSetVariableResponse:
+        if resp.jsonData.hasKey("success") and not resp.jsonData["success"].getBool():
+          let msg = if resp.jsonData.hasKey("message"): resp.jsonData["message"].getStr() else: "set variable failed"
+          app.debugPanel.addOutput("Error: " & msg)
+        else:
+          # Refresh the parent scope so the new value is reflected.
+          if app.dapThread != nil and app.dapThread.isReady.load(moAcquire) and resp.int1 > 0:
+            app.dapThread.requestVariables(resp.int1)
       of dmkEvaluateResponse:
         if resp.jsonData.hasKey("success") and not resp.jsonData["success"].getBool():
           let msg = if resp.jsonData.hasKey("message"): resp.jsonData["message"].getStr() else: "evaluate failed"

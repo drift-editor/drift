@@ -34,6 +34,7 @@ type
     value*: string
     typeName*: string
     variablesReference*: int
+    evaluateName*: string
     namedVariables*: int
     indexedVariables*: int
 
@@ -113,6 +114,7 @@ proc parseVariables*(jsonData: JsonNode): seq[DebugVariable] =
     let value = if item.hasKey("value"): item["value"].getStr() else: ""
     let typeName = if item.hasKey("type"): item["type"].getStr() else: ""
     let variablesReference = if item.hasKey("variablesReference"): item["variablesReference"].getInt() else: 0
+    let evaluateName = if item.hasKey("evaluateName"): item["evaluateName"].getStr() else: ""
     let namedVariables = if item.hasKey("namedVariables"): item["namedVariables"].getInt() else: 0
     let indexedVariables = if item.hasKey("indexedVariables"): item["indexedVariables"].getInt() else: 0
     result.add(DebugVariable(
@@ -120,6 +122,7 @@ proc parseVariables*(jsonData: JsonNode): seq[DebugVariable] =
       value: value,
       typeName: typeName,
       variablesReference: variablesReference,
+      evaluateName: evaluateName,
       namedVariables: namedVariables,
       indexedVariables: indexedVariables
     ))

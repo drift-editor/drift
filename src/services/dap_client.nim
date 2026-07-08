@@ -414,3 +414,13 @@ proc requestEvaluate*(client: DAPClient; expression: string; context: string = "
   if frameId > 0:
     args["frameId"] = %frameId
   result = await client.sendRequest("evaluate", args)
+
+proc setVariableAsync*(client: DAPClient; variablesReference: int; name: string; value: string): Future[JsonNode] {.async.} =
+  if not client.isReady:
+    return newJObject()
+  let args = %*{
+    "variablesReference": variablesReference,
+    "name": name,
+    "value": value
+  }
+  result = await client.sendRequest("setVariable", args)
