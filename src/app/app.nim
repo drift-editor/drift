@@ -1,6 +1,6 @@
 ## Drift Editor - uirelays-based Application
 
-import std/[os, osproc, strutils, json, options, monotimes, times, atomics, tables]
+import std/[os, osproc, strutils, json, options, monotimes, times, atomics, tables, sets, sequtils]
 import uirelays
 import chronos
 from pixie import readImage
@@ -13,6 +13,7 @@ import ../services/dap_thread
 import ../services/git as gitcmd
 import ../core/types
 import ../core/config as cfg
+import ../core/search_history
 import ../core/debug_types
 import ../core/recent_files
 import ../core/keybindings as kb
@@ -37,9 +38,17 @@ type
     readOnly: bool
     diffPath: string  ## For diff buffers: the file being diffed
     diffStaged: bool  ## For diff buffers: whether diffing against staged
+    lastEditTick: int
+    lastSaveTick: int
+    lastChanged: bool
+
+  ClosedTabInfo* = object
+    path*: string
+    line*: int
+    col*: int
 
   App* = ref object
-    config: cfg.AppConfig
+    config*: cfg.AppConfig
     initialAiAgent: string  ## Loaded default agent; not persisted when user switches agents at runtime.
     width, height: int
     font: Font
@@ -124,10 +133,23 @@ type
     lastDiffLines: seq[seq[DiffLine]]
     bufferLines: seq[seq[string]]
 
+    # Closed tab history
+    closedTabs*: seq[ClosedTabInfo]
+
+    # Clipboard ring
+    clipboardHistory*: seq[string]
+    clipboardHistoryIndex*: int
+
+    # External change conflict suppression
+    externalChangeSuppressed: HashSet[string]
+    externalChangePending: HashSet[string]
+
     # LSP
     lspServer: string
+    lspLanguage: string
     lspThread: LSPThread
     lspStarting: bool
+    lspErrorMsg: string
     hoverMouseX, hoverMouseY: int
 
     # DAP
@@ -203,7 +225,9 @@ proc saveAppConfig(app: App) =
   ## so runtime agent switches do not alter the saved default.
   var saved = app.config
   saved.aiAgent = app.initialAiAgent
+  app.searchPanel.saveSearchState(saved)
   cfg.saveConfig(saved)
+  saveSearchHistory(app.searchPanel.searchHistory)
 
 proc applyTheme*(app: App, name: string) =
   if name.len == 0 or app.config.themeName == name:
@@ -465,7 +489,7 @@ proc promptBaseUrl(app: App) =
   app.inputDialog.show()
 
 proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
-  var app = App(config: config, initialAiAgent: config.aiAgent, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel("Ask " & agentLabel(config.aiAgent) & "..."), debugState: dssOff, debugStopThreadId: 0, breakpoints: @[])
+  var app = App(config: config, initialAiAgent: config.aiAgent, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel("Ask " & agentLabel(config.aiAgent) & "..."), debugState: dssOff, debugStopThreadId: 0, breakpoints: @[], closedTabs: @[], clipboardHistory: @[], clipboardHistoryIndex: 0, externalChangeSuppressed: initHashSet[string](), externalChangePending: initHashSet[string]())
   app.aiPanel.subtitle = aiSubtitle(config)
   app.aiPanel.modelPreset = config.aiModelPreset
   proc sendAiPrompt(promptText: string) =
@@ -555,6 +579,38 @@ proc detectLineEnding(text: string): string =
   if text.contains("\c\L"): "CRLF"
   else: "LF"
 
+proc languageIdFor(path: string): string =
+  ## Map a file path to an LSP language identifier based on its extension.
+  if path.len == 0:
+    return "nim"
+  let ext = path.splitFile.ext.toLowerAscii()
+  case ext
+  of ".nim", ".nims": "nim"
+  of ".py": "python"
+  of ".js", ".jsx": "javascript"
+  of ".ts", ".tsx": "typescript"
+  of ".c", ".h": "c"
+  of ".cpp", ".cc", ".cxx", ".hpp": "cpp"
+  of ".cs": "csharp"
+  of ".java": "java"
+  of ".rs": "rust"
+  of ".html", ".htm": "html"
+  of ".xml": "xml"
+  of ".md", ".markdown": "markdown"
+  else: ""
+
+proc lspServerForLanguage(app: App, lang: string): string =
+  ## Resolve the configured LSP server for a language, falling back to the
+  ## legacy single `lspServer` value for Nim or when the per-language table
+  ## is empty.
+  if lang.len == 0:
+    return ""
+  if app.config.lspServers.hasKey(lang):
+    return app.config.lspServers[lang]
+  if lang == "nim" and app.config.lspServer.len > 0:
+    return app.config.lspServer
+  return ""
+
 proc lspStatusString(app: App): string =
   if app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
     return "LSP: " & app.lspServer
@@ -562,6 +618,69 @@ proc lspStatusString(app: App): string =
     return "LSP: starting..."
   else:
     return "LSP: off"
+
+proc lspStatusTooltip(app: App): string =
+  ## Detailed tooltip shown when hovering the status-bar LSP section.
+  let state = if app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
+    "ready"
+  elif app.lspStarting:
+    "starting"
+  elif app.lspThread != nil:
+    "error"
+  else:
+    "off"
+  result = "Server: " & app.lspServer & "\nLanguage: " & app.lspLanguage & "\nState: " & state
+  if app.lspErrorMsg.len > 0:
+    result.add("\nError: " & app.lspErrorMsg)
+
+proc applyLspEditsToBuffer(app: App, idx: int, edits: seq[LSPTextEdit]) =
+  ## Apply a sequence of LSP text edits to an open buffer and notify the LSP server.
+  if idx < 0 or idx >= app.buffers.len or edits.len == 0:
+    return
+  let b = addr app.buffers[idx]
+  let newText = applyTextEdits(b.ed.fullText, edits)
+  b.ed.setText(newText)
+  b.ed.markChanged()
+  b.lastChanged = true
+  app.tabBar.updateTabModified($idx, true)
+  if app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
+    app.lspThread.notifyDidChange(b.path, newText)
+
+proc lspRangeForSelection(ed: SynEdit): Option[LSPRange] =
+  ## Derive an LSP range from the current editor selection.
+  ## SynEdit does not expose selection offsets, so we locate the selected text
+  ## in the full buffer and pick the occurrence closest to the cursor.
+  let selected = ed.getSelectedText()
+  if selected.len == 0:
+    return none(LSPRange)
+  let full = ed.fullText()
+  let cursorOff = offsetAtLineCol(full, ed.currentLine, ed.currentCol)
+  var bestStart = -1
+  var bestDist = high(int)
+  var start = 0
+  while start <= full.len - selected.len:
+    let idx = find(full, selected, start)
+    if idx < 0:
+      break
+    let endOff = idx + selected.len
+    let dist = if cursorOff >= idx and cursorOff <= endOff:
+      0
+    else:
+      min(abs(cursorOff - idx), abs(cursorOff - endOff))
+    if dist < bestDist:
+      bestDist = dist
+      bestStart = idx
+      if dist == 0:
+        break
+    start = idx + 1
+  if bestStart < 0:
+    return none(LSPRange)
+  let (startLine, startCol) = lineColAtOffset(full, bestStart)
+  let (endLine, endCol) = lineColAtOffset(full, bestStart + selected.len)
+  return some(LSPRange(
+    start: LSPPosition(line: startLine, character: startCol),
+    `end`: LSPPosition(line: endLine, character: endCol)
+  ))
 
 proc dapStatusString(app: App): string =
   case app.debugState
@@ -741,6 +860,61 @@ proc pathStartsWith(path, prefix: string): bool =
   let normPrefix = prefix.replace('\\', '/')
   normPath.startsWith(normPrefix & "/")
 
+proc pushClipboardHistory*(app: App, text: string) =
+  ## Add text to the clipboard ring, removing duplicates and capping at config size.
+  if text.len == 0 or app.config.clipboardHistorySize <= 0:
+    return
+  let idx = app.clipboardHistory.find(text)
+  if idx >= 0:
+    app.clipboardHistory.delete(idx)
+  app.clipboardHistory.insert(text, 0)
+  if app.clipboardHistory.len > app.config.clipboardHistorySize:
+    app.clipboardHistory.setLen(app.config.clipboardHistorySize)
+
+proc saveBuffer(app: App, idx: int; silent: bool = false): bool =
+  ## Save a specific buffer by index. Returns true on success.
+  if idx < 0 or idx >= app.buffers.len:
+    return false
+  let b = app.buffers[idx]
+  if b.path.len == 0:
+    return false
+  if b.isImage:
+    if not silent:
+      discard app.notificationManager.info("Images are read-only")
+    return false
+  try:
+    app.buffers[idx].ed.saveToFile(b.path)
+  except CatchableError as err:
+    if not silent:
+      discard app.notificationManager.error("Failed to save " & b.path.extractFilename & ": " & err.msg)
+    return false
+  if not silent:
+    discard app.notificationManager.success("Saved " & b.path.extractFilename)
+  app.lastDiffLines[idx] = getDiffLines(b.path)
+  app.buffers[idx].lastSaveTick = getTicks()
+  if app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
+    let lang = languageIdFor(b.path)
+    if app.lspServerForLanguage(lang).len > 0:
+      let text = app.buffers[idx].ed.fullText()
+      app.lspThread.notifyDidChange(b.path, text)
+  return true
+
+proc checkAutoSave(app: App) =
+  ## Save dirty buffers after the configured auto-save delay.
+  if app.config.autoSave != "afterDelay":
+    return
+  let now = getTicks()
+  for i in 0 ..< app.buffers.len:
+    let b = app.buffers[i]
+    if b.path.len == 0 or b.isImage or b.diffPath.len > 0:
+      continue
+    if not b.ed.changed:
+      continue
+    if b.lastSaveTick >= b.lastEditTick:
+      continue
+    if now - b.lastEditTick > app.config.autoSaveDelayMs:
+      discard app.saveBuffer(i, silent = true)
+
 proc lspSectionBounds(app: App, statusBounds: coords.Rect): coords.Rect =
   sectionBoundsAtIndex(app, statusBounds, app.statusBar.lspIndex)
 
@@ -898,8 +1072,15 @@ proc lspExeFor(serverName: string): string =
   else: serverName
 
 proc restartLSP(app: App, serverName: string) =
+  let lang = if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+               languageIdFor(app.buffers[app.currentBuffer].path)
+             else:
+               "nim"
+  app.lspLanguage = lang
   app.lspServer = serverName
-  app.config.lspServer = serverName
+  app.config.lspServers[lang] = serverName
+  if lang == "nim":
+    app.config.lspServer = serverName
   saveAppConfig(app)
   # Stop existing LSP
   if app.lspThread != nil:
@@ -913,14 +1094,14 @@ proc restartLSP(app: App, serverName: string) =
       app.bufferMarkers[i].setMarkers(msDiagnostic, @[])
       applyMarkers(app.buffers[i].ed, app.bufferMarkers[i])
   app.diagPanel.store = DiagnosticStore()
-  # Restart if any Nim buffer is open
-  var hasNim = false
+  # Restart if any buffer of this language is open
+  var hasLang = false
   for b in app.buffers:
-    if b.path.endsWith(".nim") or b.path.len == 0:
-      hasNim = true
+    if languageIdFor(b.path) == lang:
+      hasLang = true
       break
-  if hasNim:
-    app.lspThread = newLSPThread(lspExeFor(app.lspServer), app.config.lspConfig)
+  if hasLang:
+    app.lspThread = newLSPThread(lspExeFor(app.lspServer), lang, app.config.lspConfig)
     app.lspStarting = true
 
 proc showLSPServerMenu(app: App, lspBounds: coords.Rect) =
@@ -949,7 +1130,8 @@ proc updateTitle(app: App) =
   if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
     let b = app.buffers[app.currentBuffer]
     let name = if b.path.len > 0: b.path.extractFilename else: "untitled"
-    setWindowTitle(name & " - Drift")
+    let prefix = if b.ed.changed: "• " else: ""
+    setWindowTitle(prefix & name & " - Drift")
   else:
     setWindowTitle("Drift")
 
@@ -983,6 +1165,13 @@ proc switchBuffer(app: App, idx: int) =
 proc closeBuffer(app: App, idx: int) =
   if idx < 0 or idx >= app.buffers.len:
     return
+
+  # Remember closed tab so it can be reopened.
+  let b = app.buffers[idx]
+  if b.path.len > 0 and app.config.closedTabHistorySize > 0:
+    app.closedTabs.add(ClosedTabInfo(path: b.path, line: b.ed.currentLine, col: b.ed.currentCol))
+    if app.closedTabs.len > app.config.closedTabHistorySize:
+      app.closedTabs.delete(0)
 
   # Notify LSP that the document is closed (keeps diagnostics in panel
   # for the user to browse even after the file is closed).
@@ -1069,12 +1258,12 @@ proc hideDiffView*(app: App) =
 proc addRecentFile(app: App, path: string) =
   app.recentFiles = addToRecentFiles(app.recentFiles, path, isFolder = false)
   saveRecentFiles(app.recentFiles)
-  app.welcomeScreen.updateRecentFiles(recentItems(app.recentFiles))
+  app.welcomeScreen.updateRecentFilesWithPins(recentItems(app.recentFiles), app.config.pinnedRecentFiles)
 
 proc addRecentFolder*(app: App, path: string) =
   app.recentFiles = addToRecentFiles(app.recentFiles, path, isFolder = true)
   saveRecentFiles(app.recentFiles)
-  app.welcomeScreen.updateRecentFiles(recentItems(app.recentFiles))
+  app.welcomeScreen.updateRecentFilesWithPins(recentItems(app.recentFiles), app.config.pinnedRecentFiles)
 
 proc offsetAtPos(text: string; line, col: int): int =
   var currLine = 0
@@ -1277,10 +1466,11 @@ proc openBuffer(app: App, path: string): int =
     let name = path.extractFilename
     discard app.tabBar.addTab($result, name)
     app.switchBuffer(result)
+    app.buffers[result].lastSaveTick = getTicks()
     return result
 
   var ed = createSynEdit(app.font, app.editorTheme())
-  ed.showLineNumbers = true
+  ed.showLineNumbers = app.config.showLineNumbers
   ed.lang = fileExtToLanguage(path.splitFile.ext)
   ed.tabSize = app.config.tabSize
   if fileExists(path):
@@ -1300,19 +1490,24 @@ proc openBuffer(app: App, path: string): int =
   let name = if path.len > 0: path.extractFilename else: "untitled"
   discard app.tabBar.addTab($result, name)
   app.switchBuffer(result)
+  app.buffers[result].lastSaveTick = getTicks()
 
-  # Start LSP for Nim files
-  if path.endsWith(".nim"):
+  # Start LSP for supported languages
+  let lang = languageIdFor(path)
+  let server = app.lspServerForLanguage(lang)
+  if server.len > 0:
     if app.lspThread.isNil and not app.lspStarting:
-      stderr.writeLine("[app] starting LSP thread: " & lspExeFor(app.lspServer))
-      app.lspThread = newLSPThread(lspExeFor(app.lspServer), app.config.lspConfig)
+      stderr.writeLine("[app] starting LSP thread: " & lspExeFor(server) & " language: " & lang)
+      app.lspServer = server
+      app.lspLanguage = lang
+      app.lspThread = newLSPThread(lspExeFor(server), lang, app.config.lspConfig)
       app.lspStarting = true
     elif app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
       app.lspThread.notifyDidOpen(path, ed.fullText())
 
 proc newBuffer(app: App) =
   var ed = createSynEdit(app.font, app.editorTheme())
-  ed.showLineNumbers = true
+  ed.showLineNumbers = app.config.showLineNumbers
   ed.lang = langNim
   ed.tabSize = app.config.tabSize
   app.buffers.add(Buffer(ed: ed, path: "", isImage: false))
@@ -1324,30 +1519,13 @@ proc newBuffer(app: App) =
   let idx = app.buffers.high
   discard app.tabBar.addTab($idx, "untitled")
   app.switchBuffer(idx)
+  app.buffers[idx].lastSaveTick = getTicks()
 
 proc newFile*(app: App)
 proc openFolder*(app: App, path: string)
 
 proc saveCurrentBuffer(app: App): bool =
-  if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
-    return false
-  let idx = app.currentBuffer
-  if app.buffers[idx].path.len == 0:
-    return false
-  if app.buffers[idx].isImage:
-    discard app.notificationManager.info("Images are read-only")
-    return false
-  try:
-    app.buffers[idx].ed.saveToFile(app.buffers[idx].path)
-  except CatchableError as err:
-    discard app.notificationManager.error("Failed to save " & app.buffers[idx].path.extractFilename & ": " & err.msg)
-    return false
-  discard app.notificationManager.success("Saved " & app.buffers[idx].path.extractFilename)
-  app.lastDiffLines[idx] = getDiffLines(app.buffers[idx].path)
-  if app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and app.buffers[idx].path.endsWith(".nim"):
-    let text = app.buffers[idx].ed.fullText()
-    app.lspThread.notifyDidChange(app.buffers[idx].path, text)
-  return true
+  saveBuffer(app, app.currentBuffer)
 
 proc saveAsDialog*(app: App) =
   if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
@@ -1369,6 +1547,7 @@ proc saveAsDialog*(app: App) =
     return
   discard app.notificationManager.success("Saved " & path.extractFilename)
   app.lastDiffLines[app.currentBuffer] = getDiffLines(path)
+  app.buffers[app.currentBuffer].lastSaveTick = getTicks()
   app.updateTitle()
   app.updateStatus()
   app.tabBar.clearTabs()
@@ -1377,9 +1556,11 @@ proc saveAsDialog*(app: App) =
     discard app.tabBar.addTab($i, name)
   discard app.tabBar.setActiveTab($app.currentBuffer)
   # Notify LSP about the new file path
-  if app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and path.endsWith(".nim"):
-    let text = app.buffers[app.currentBuffer].ed.fullText()
-    app.lspThread.notifyDidOpen(path, text)
+  if app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
+    let lang = languageIdFor(path)
+    if app.lspServerForLanguage(lang).len > 0:
+      let text = app.buffers[app.currentBuffer].ed.fullText()
+      app.lspThread.notifyDidOpen(path, text)
 
 proc openFileDialog*(app: App): bool =
   let di = DialogInfo(kind: dkOpenFile, title: "Open File")
@@ -1403,7 +1584,7 @@ proc openFolderDialog*(app: App): bool =
       app.gitPanel.updateRepository()
       app.recentFiles = addToRecentFiles(app.recentFiles, path, isFolder = true)
       saveRecentFiles(app.recentFiles)
-      app.welcomeScreen.updateRecentFiles(recentItems(app.recentFiles))
+      app.welcomeScreen.updateRecentFilesWithPins(recentItems(app.recentFiles), app.config.pinnedRecentFiles)
       return true
   false
 
@@ -1608,8 +1789,12 @@ proc init*(app: App) =
     if idx >= 0 and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
       app.buffers[app.currentBuffer].ed.gotoLine(line, col)
 
-  # Status bar
-  app.lspServer = if app.config.lspServer.len > 0: app.config.lspServer else: "minlsp"
+  # LSP
+  app.lspLanguage = "nim"
+  app.lspServer = app.lspServerForLanguage("nim")
+  if app.lspServer.len == 0:
+    app.lspServer = "minlsp"
+
   app.statusBar = newStatusBar()
 
   # Terminal
@@ -1622,7 +1807,7 @@ proc init*(app: App) =
   app.themeSelector = newThemeSelector()
   app.gi = GlobalInput()
   app.commands = newCommandRegistry()
-  app.searchPanel = newSearchPanel(app.uiFont, app.uiFm)
+  app.searchPanel = newSearchPanel(app.uiFont, app.uiFm, app.config)
   app.searchPanel.onWorkspaceResultClick = proc(path: string; line, col: int) =
     if fileExists(path):
       discard app.openBuffer(path)
@@ -1665,11 +1850,35 @@ proc init*(app: App) =
         app.hideWelcome()
       else:
         app.recentFiles = loadRecentFiles()
-        app.welcomeScreen.updateRecentFiles(recentItems(app.recentFiles))
+        app.welcomeScreen.updateRecentFilesWithPins(recentItems(app.recentFiles), app.config.pinnedRecentFiles)
+  app.welcomeScreen.onShowTooltip = proc(text: string; x, y: int) =
+    app.tooltip.showTooltip(text, x, y)
+  app.welcomeScreen.onHideTooltip = proc() =
+    app.tooltip.hideTooltip()
+  app.welcomeScreen.onShowDocumentation = proc() =
+    let readme = getAppDir() / "README.md"
+    if fileExists(readme):
+      discard app.openBuffer(readme)
+      app.hideWelcome()
+  app.welcomeScreen.onPinToggle = proc(path: string; pinned: bool) =
+    if pinned:
+      if path notin app.config.pinnedRecentFiles:
+        app.config.pinnedRecentFiles.insert(path, 0)
+    else:
+      app.config.pinnedRecentFiles.keepItIf(it != path)
+    saveAppConfig(app)
 
   # Load persisted recent files
   app.recentFiles = loadRecentFiles()
-  app.welcomeScreen.updateRecentFiles(recentItems(app.recentFiles))
+  app.welcomeScreen.updateRecentFilesWithPins(recentItems(app.recentFiles), app.config.pinnedRecentFiles)
+
+  # Load persisted search history separately from config.
+  let persistedSearchHistory = loadSearchHistory()
+  if persistedSearchHistory.len > 0:
+    app.searchPanel.searchHistory = mergeSearchHistory(app.searchPanel.searchHistory, persistedSearchHistory)
+    if app.searchPanel.searchHistory.len > 0 and app.searchPanel.findText.len == 0 and app.config.searchRememberOptions:
+      app.searchPanel.findText = app.searchPanel.searchHistory[^1]
+      app.searchPanel.findCursor = app.searchPanel.findText.len
 
   # Tooltip
   app.tooltip = newTooltip()
@@ -1780,6 +1989,94 @@ proc init*(app: App) =
     proc() =
       if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
         app.buffers[app.currentBuffer].ed.selectLine())
+  app.commandPalette.registerCommand("edit.duplicateSelection", "Duplicate Selection", "Duplicate selection or current line", ccEdit, "Ctrl+D",
+    proc() =
+      if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+        let ed = addr app.buffers[app.currentBuffer].ed
+        let sel = ed[].getSelectedText()
+        if sel.len > 0:
+          ed[].insertText(sel & sel)
+        else:
+          ed[].duplicateLine())
+  app.commandPalette.registerCommand("edit.copy", "Copy", "Copy selection to clipboard", ccEdit, "Ctrl+C",
+    proc() =
+      if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+        let text = app.buffers[app.currentBuffer].ed.getSelectedText()
+        if text.len > 0:
+          putClipboardText(text)
+          app.pushClipboardHistory(text))
+  app.commandPalette.registerCommand("edit.cut", "Cut", "Cut selection to clipboard", ccEdit, "Ctrl+X",
+    proc() =
+      if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+        let text = app.buffers[app.currentBuffer].ed.getSelectedText()
+        if text.len > 0:
+          putClipboardText(text)
+          app.pushClipboardHistory(text)
+          app.buffers[app.currentBuffer].ed.insertText(""))
+  app.commandPalette.registerCommand("edit.cycleClipboard", "Cycle Clipboard", "Cycle through clipboard history", ccEdit, "Ctrl+Shift+V",
+    proc() =
+      if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+        let ed = addr app.buffers[app.currentBuffer].ed
+        if app.clipboardHistory.len == 0:
+          let clip = getClipboardText()
+          if clip.len > 0:
+            app.pushClipboardHistory(clip)
+        if app.clipboardHistory.len > 0:
+          let idx = app.clipboardHistoryIndex mod app.clipboardHistory.len
+          ed[].insertText(app.clipboardHistory[idx])
+          app.clipboardHistoryIndex = (app.clipboardHistoryIndex + 1) mod app.clipboardHistory.len)
+  app.commandPalette.registerCommand("file.reopenClosedTab", "Reopen Closed Tab", "Reopen the most recently closed tab", ccFile, "Ctrl+Shift+T",
+    proc() =
+      if app.closedTabs.len > 0:
+        let info = app.closedTabs.pop()
+        let idx = app.openBuffer(info.path)
+        if idx >= 0 and idx < app.buffers.len:
+          app.buffers[idx].ed.gotoLine(info.line + 1, info.col))
+  app.commandPalette.registerCommand("file.newNamed", "New File Named...", "Create a new file with a given name", ccFile, "",
+    proc() =
+      app.inputDialog.title = "New File"
+      app.inputDialog.prompt = "Enter file name:"
+      app.inputDialog.text = ""
+      app.inputDialog.centerOnScreen(app.width, app.height)
+      app.inputDialog.onResult = proc(confirmed: bool, text: string) =
+        if confirmed and text.len > 0:
+          let root = if app.fileExplorer.rootPath.len > 0: app.fileExplorer.rootPath else: getCurrentDir()
+          let newPath = root / text
+          try:
+            writeFile(newPath, "")
+            discard app.openBuffer(newPath)
+            app.addRecentFile(newPath)
+          except CatchableError as err:
+            discard app.notificationManager.error("Failed to create file: " & err.msg)
+      app.inputDialog.show())
+  app.commandPalette.registerCommand("file.openFolder", "Open Folder...", "Open a workspace folder", ccFile, "",
+    proc() =
+      discard app.openFolderDialog())
+  app.commandPalette.registerCommand("file.saveAs", "Save As...", "Save current file with a new name", ccFile, "Ctrl+Shift+S",
+    proc() =
+      if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+        let b = app.buffers[app.currentBuffer]
+        if b.path.len > 0:
+          app.inputDialog.title = "Save As"
+          app.inputDialog.prompt = "Enter new file name:"
+          app.inputDialog.text = b.path.extractFilename
+          app.inputDialog.centerOnScreen(app.width, app.height)
+          app.inputDialog.onResult = proc(confirmed: bool, text: string) =
+            if confirmed and text.len > 0 and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+              let root = b.path.parentDir
+              let newPath = root / text
+              try:
+                writeFile(newPath, b.ed.fullText)
+                app.buffers[app.currentBuffer].path = newPath
+                app.buffers[app.currentBuffer].lastSaveTick = getTicks()
+                app.buffers[app.currentBuffer].lastChanged = false
+                app.tabBar.updateTabModified($app.currentBuffer, false)
+                app.updateTitle()
+                app.updateStatus()
+                app.addRecentFile(newPath)
+              except CatchableError as err:
+                discard app.notificationManager.error("Failed to save file: " & err.msg)
+          app.inputDialog.show())
   app.commandPalette.registerCommand("navigate.gotoLine", "Go to Line...", "Jump to a specific line number", ccView, "Ctrl+G",
     proc() =
       if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
@@ -1806,7 +2103,7 @@ proc init*(app: App) =
     app.applyTheme(name)
   app.themeSelector.onCancel = proc() =
     app.setTheme(app.config.themeName)
-  app.commandPalette.registerCommand("theme.selector", "Color Theme", "Open theme selector", ccView, "Ctrl+Shift+T",
+  app.commandPalette.registerCommand("theme.selector", "Color Theme", "Open theme selector", ccView, "",
     proc() =
       app.themeSelector.show(app.config.themeName))
 
@@ -1853,6 +2150,130 @@ proc init*(app: App) =
     proc() =
       app.config.autoCloseBrackets = not app.config.autoCloseBrackets
       saveAppConfig(app))
+
+  app.commandPalette.registerCommand("editor.toggleLineNumbers", "Toggle Line Numbers", "Show or hide editor line numbers", ccEdit, "",
+    proc() =
+      app.config.showLineNumbers = not app.config.showLineNumbers
+      for i in 0 ..< app.buffers.len:
+        if not app.buffers[i].isImage:
+          app.buffers[i].ed.showLineNumbers = app.config.showLineNumbers
+      saveAppConfig(app))
+
+  app.commandPalette.registerCommand("editor.increaseTabSize", "Increase Tab Size", "Increase editor indentation width", ccEdit, "",
+    proc() =
+      if app.config.tabSize < 8:
+        app.config.tabSize += 1
+        for i in 0 ..< app.buffers.len:
+          if not app.buffers[i].isImage:
+            app.buffers[i].ed.tabSize = app.config.tabSize
+        saveAppConfig(app)
+        discard app.notificationManager.info("Tab size: " & $app.config.tabSize))
+
+  app.commandPalette.registerCommand("editor.decreaseTabSize", "Decrease Tab Size", "Decrease editor indentation width", ccEdit, "",
+    proc() =
+      if app.config.tabSize > 1:
+        app.config.tabSize -= 1
+        for i in 0 ..< app.buffers.len:
+          if not app.buffers[i].isImage:
+            app.buffers[i].ed.tabSize = app.config.tabSize
+        saveAppConfig(app)
+        discard app.notificationManager.info("Tab size: " & $app.config.tabSize))
+  app.commandPalette.registerCommand("editor.formatDocument", "Format Document", "Format the current document via LSP", ccEdit, "Shift+Alt+F",
+    proc() =
+      if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
+        return
+      let b = app.buffers[app.currentBuffer]
+      let lang = languageIdFor(b.path)
+      if b.path.len == 0 or app.lspServerForLanguage(lang).len == 0:
+        discard app.notificationManager.info("Format Document is not available for this file type")
+        return
+      if app.lspThread == nil or not app.lspThread.isReady.load(moAcquire):
+        discard app.notificationManager.info("LSP is not ready")
+        return
+      app.lspThread.requestFormatting(b.path))
+
+  app.commandPalette.registerCommand("editor.formatSelection", "Format Selection", "Format the current selection via LSP", ccEdit, "",
+    proc() =
+      if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
+        return
+      let b = app.buffers[app.currentBuffer]
+      let lang = languageIdFor(b.path)
+      if b.path.len == 0 or app.lspServerForLanguage(lang).len == 0:
+        discard app.notificationManager.info("Format Selection is not available for this file type")
+        return
+      if app.lspThread == nil or not app.lspThread.isReady.load(moAcquire):
+        discard app.notificationManager.info("LSP is not ready")
+        return
+      let rangeOpt = lspRangeForSelection(b.ed)
+      if rangeOpt.isNone:
+        discard app.notificationManager.info("No selection to format")
+        return
+      app.lspThread.requestRangeFormatting(b.path, rangeOpt.get()))
+
+  app.commandPalette.registerCommand("editor.renameSymbol", "Rename Symbol", "Rename the symbol under the cursor via LSP", ccEdit, "F2",
+    proc() =
+      if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
+        return
+      let b = app.buffers[app.currentBuffer]
+      let lang = languageIdFor(b.path)
+      if b.path.len == 0 or app.lspServerForLanguage(lang).len == 0:
+        discard app.notificationManager.info("Rename Symbol is not available for this file type")
+        return
+      if app.lspThread == nil or not app.lspThread.isReady.load(moAcquire):
+        discard app.notificationManager.info("LSP is not ready")
+        return
+      let line = b.ed.currentLine
+      let col = b.ed.currentCol
+      app.inputDialog.title = "Rename Symbol"
+      app.inputDialog.prompt = "Enter new name:"
+      app.inputDialog.text = ""
+      app.inputDialog.centerOnScreen(app.width, app.height)
+      app.inputDialog.onResult = proc(confirmed: bool, text: string) =
+        if confirmed and text.len > 0 and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+          app.lspThread.requestRename(b.path, line, col, text)
+      app.inputDialog.show())
+
+  app.commandPalette.registerCommand("editor.findReferences", "Find References", "Find all references to the symbol under the cursor via LSP", ccEdit, "Shift+F12",
+    proc() =
+      if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
+        return
+      let b = app.buffers[app.currentBuffer]
+      let lang = languageIdFor(b.path)
+      if b.path.len == 0 or app.lspServerForLanguage(lang).len == 0:
+        discard app.notificationManager.info("Find References is not available for this file type")
+        return
+      if app.lspThread == nil or not app.lspThread.isReady.load(moAcquire):
+        discard app.notificationManager.info("LSP is not ready")
+        return
+      app.lspThread.requestReferences(b.path, b.ed.currentLine, b.ed.currentCol))
+
+  app.commandPalette.registerCommand("workbench.gotoSymbol", "Go to Symbol in File", "List and jump to symbols in the current file via LSP", ccView, "Ctrl+Shift+O",
+    proc() =
+      if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
+        return
+      let b = app.buffers[app.currentBuffer]
+      let lang = languageIdFor(b.path)
+      if b.path.len == 0 or app.lspServerForLanguage(lang).len == 0:
+        discard app.notificationManager.info("Go to Symbol is not available for this file type")
+        return
+      if app.lspThread == nil or not app.lspThread.isReady.load(moAcquire):
+        discard app.notificationManager.info("LSP is not ready")
+        return
+      app.lspThread.requestDocumentSymbols(b.path))
+
+  app.commandPalette.registerCommand("workbench.gotoSymbolInWorkspace", "Go to Symbol in Workspace", "Search and jump to symbols across the workspace via LSP", ccView, "Ctrl+T",
+    proc() =
+      if app.lspThread == nil or not app.lspThread.isReady.load(moAcquire):
+        discard app.notificationManager.info("LSP is not ready")
+        return
+      app.inputDialog.title = "Go to Symbol in Workspace"
+      app.inputDialog.prompt = "Enter symbol name:"
+      app.inputDialog.text = ""
+      app.inputDialog.centerOnScreen(app.width, app.height)
+      app.inputDialog.onResult = proc(confirmed: bool, text: string) =
+        if confirmed and text.len > 0:
+          app.lspThread.requestWorkspaceSymbols(text)
+      app.inputDialog.show())
 
   app.commandPalette.registerCommand("keybindings.open", "Open Keybindings File", "Edit keybinding overrides in ~/.config/drift/keybindings.toml", ccView, "",
     proc() =
@@ -1928,6 +2349,24 @@ proc showLocationPicker*(app: App, locations: seq[Location]) =
     let display = path.extractFilename & " :" & $(loc.range.start.line + 1) & ":" & $(loc.range.start.character + 1)
     items.add(LocationItem(display: display, loc: loc))
 
+  app.locationPicker.show(items, app.mouseX, app.mouseY)
+
+proc showSymbolPicker*(app: App, path: string, symbols: seq[LSPSymbol]) =
+  ## Show a picker for LSP document/workspace symbols.
+  if symbols.len == 0:
+    discard app.notificationManager.info("No symbols found")
+    return
+  if symbols.len == 1:
+    let s = symbols[0]
+    let loc = Location(uri: s.uri, range: s.range)
+    if app.locationPicker.onSelect != nil:
+      app.locationPicker.onSelect(loc)
+    return
+
+  var items: seq[LocationItem] = @[]
+  for s in symbols:
+    let loc = Location(uri: s.uri, range: s.range)
+    items.add(LocationItem(display: s.name, loc: loc))
   app.locationPicker.show(items, app.mouseX, app.mouseY)
 
 proc run*(app: App) =
@@ -2118,6 +2557,27 @@ proc run*(app: App) =
         app.tooltip.hideTooltip()
       if app.lspThread != nil: app.lspThread.cancelHover()
       app.clearHoverState()
+      # Status bar click handling for line-ending / encoding sections.
+      if e.button == LeftButton:
+        let idx = rightSectionIndexAt(app, statusBounds, e.x, e.y)
+        if idx == app.statusBar.lineEndingIndex and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
+          var b = app.buffers[app.currentBuffer]
+          if b.path.len > 0 and not b.isImage and b.diffPath.len == 0:
+            let text = b.ed.fullText
+            let hasCRLF = text.contains("\c\L")
+            if hasCRLF:
+              b.ed.setText(text.replace("\c\L", "\L"))
+            else:
+              b.ed.setText(text.replace("\L", "\c\L"))
+            b.ed.markChanged()
+            b.lastChanged = true
+            app.tabBar.updateTabModified($app.currentBuffer, true)
+            app.updateTitle()
+            app.updateStatus()
+            discard app.gi.consume()
+        elif idx == app.statusBar.encodingIndex:
+          # UTF-8 is the only supported encoding for now; show a notification.
+          discard app.notificationManager.info("Encoding is fixed to UTF-8")
       # Right-click context menu
       if e.button == RightButton:
         let termH = if app.showTerminal: app.terminalHeight else: 0
@@ -2135,9 +2595,13 @@ proc run*(app: App) =
               else:
                 discard startProcess("/usr/bin/open", args = [path], options = {poUsePath})
             except CatchableError: discard
-          callbacks.onCopyPath = proc(path: string) = putClipboardText(path)
+          callbacks.onCopyPath = proc(path: string) =
+            putClipboardText(path)
+            app.pushClipboardHistory(path)
           callbacks.onCopyRelativePath = proc(path: string) =
-            putClipboardText(relativePath(path, app.fileExplorer.rootPath))
+            let rel = relativePath(path, app.fileExplorer.rootPath)
+            putClipboardText(rel)
+            app.pushClipboardHistory(rel)
           callbacks.onNewFile = proc(dir: string) =
             app.inputDialog.title = "New File"
             app.inputDialog.prompt = "Enter file name:"
@@ -2318,6 +2782,18 @@ proc run*(app: App) =
         app.tooltip.hideTooltip()
         if app.lspThread != nil: app.lspThread.cancelHover()
         app.clearHoverState(clearPending = false)
+      # Status bar hover tracking for line-ending/encoding sections.
+      app.statusBar.hoverRightIndex = rightSectionIndexAt(app, statusBounds, e.x, e.y)
+      # Show a tooltip when hovering the LSP status section.
+      if app.statusBar.lspIndex >= 0 and app.statusBar.hoverRightIndex == app.statusBar.lspIndex:
+        let text = app.lspStatusTooltip()
+        app.tooltip.showTooltip(text, app.mouseX, app.mouseY)
+      elif app.tooltip.visible and app.statusBar.hoverRightIndex != app.statusBar.lspIndex:
+        # Hide tooltip when leaving the LSP section (but leave editor hover tooltips alone
+        # unless the mouse is clearly over the status bar).
+        let statusHovered = rightSectionIndexAt(app, statusBounds, app.mouseX, app.mouseY) >= 0
+        if statusHovered:
+          app.tooltip.hideTooltip()
 
     if e.kind == MouseUpEvent:
       app.sidebarDragging = false
@@ -2385,8 +2861,47 @@ proc run*(app: App) =
             if b.path == path:
               if not b.ed.changed:
                 app.buffers[i].ed.loadFromFile(path)
+                app.buffers[i].lastSaveTick = getTicks()
+                app.buffers[i].lastChanged = false
+                app.tabBar.updateTabModified($i, false)
+                if i == app.currentBuffer:
+                  app.updateTitle()
+                  app.updateStatus()
+                app.externalChangeSuppressed.excl(path)
+                app.externalChangePending.excl(path)
               else:
-                discard app.notificationManager.warning("File changed externally: " & path.extractFilename & " — reload skipped (unsaved changes)")
+                if app.config.fileWatcherAutoReload:
+                  if path notin app.externalChangePending:
+                    let wasSuppressed = path in app.externalChangeSuppressed
+                    if wasSuppressed:
+                      app.externalChangeSuppressed.excl(path)
+                    if not wasSuppressed:
+                      let reloadPath = path
+                      let bufferIdx = i
+                      let filename = reloadPath.extractFilename
+                      let dlg = newDialog("File Changed Externally", filename & " has changed on disk. Reload and discard your changes?", app.uiFont)
+                      dlg.buttons = @[
+                        DialogButton(label: "Reload", result: drOk, isDefault: true),
+                        DialogButton(label: "Keep", result: drCancel, isCancel: true)
+                      ]
+                      dlg.onResult = proc(res: DialogResult) =
+                        app.externalChangePending.excl(reloadPath)
+                        if res == drOk and bufferIdx >= 0 and bufferIdx < app.buffers.len and app.buffers[bufferIdx].path == reloadPath:
+                          app.buffers[bufferIdx].ed.loadFromFile(reloadPath)
+                          app.buffers[bufferIdx].lastSaveTick = getTicks()
+                          app.buffers[bufferIdx].lastChanged = false
+                          app.tabBar.updateTabModified($bufferIdx, false)
+                          if bufferIdx == app.currentBuffer:
+                            app.updateTitle()
+                            app.updateStatus()
+                          app.externalChangeSuppressed.excl(reloadPath)
+                        elif res == drCancel:
+                          app.externalChangeSuppressed.incl(reloadPath)
+                      dlg.centerOnScreen(app.width, app.height)
+                      app.externalChangePending.incl(reloadPath)
+                      app.dialogManager.show(dlg)
+                else:
+                  discard app.notificationManager.warning("File changed externally: " & path.extractFilename & " — reload skipped (unsaved changes)")
               break
         if path.dirExists or (path.parentDir.dirExists):
           app.fileExplorer.refresh()
@@ -2394,6 +2909,9 @@ proc run*(app: App) =
         let dirPath = path.parentDir
         if dirPath.dirExists:
           app.fileExplorer.refresh()
+
+    # Auto-save dirty buffers after delay
+    app.checkAutoSave()
 
     # Poll LSP responses
     if app.lspThread != nil:
@@ -2408,20 +2926,23 @@ proc run*(app: App) =
       for resp in responses:
         if resp.kind == lmkReady:
           app.lspStarting = false
-          stderr.writeLine("[app] LSP ready, notifying didOpen for all open .nim buffers")
+          stderr.writeLine("[app] LSP ready, notifying didOpen for all open " & app.lspLanguage & " buffers")
           for b in app.buffers:
-            if b.path.endsWith(".nim"):
+            if languageIdFor(b.path) == app.lspLanguage:
               app.lspThread.notifyDidOpen(b.path, b.ed.fullText())
         else:
           pending.add(resp)
       for resp in pending:
         stderr.writeLine("[app] LSP response: " & $resp.kind)
         case resp.kind
-        of lmkReady: discard  # already handled above
         of lmkError:
           app.lspStarting = false
+          app.lspErrorMsg = resp.str1
           stderr.writeLine("[app] LSP error: " & resp.str1)
           discard app.notificationManager.error("LSP: " & resp.str1)
+        of lmkReady:
+          app.lspErrorMsg = ""
+          discard  # already handled above
         of lmkHover:
           stderr.writeLine("[app] LSP response: lmkHover hasText=" & $resp.hoverText.isSome & " mouse=(" & $app.mouseX & "," & $app.mouseY & ") hoverMouse=(" & $app.hoverMouseX & "," & $app.hoverMouseY & ")")
           let hoverMatchesRequest = app.hoverRequestId >= 0 and
@@ -2452,6 +2973,60 @@ proc run*(app: App) =
           for i, loc in resp.locations:
             stderr.writeLine("[app]   loc[" & $i & "] uri=" & loc.uri)
           app.showLocationPicker(resp.locations)
+        of lmkFormat:
+          stderr.writeLine("[app] lmkFormat received: edits=" & $resp.edits.len)
+          if resp.edits.len > 0:
+            var found = false
+            for i in 0 ..< app.buffers.len:
+              if app.buffers[i].path == resp.str1:
+                app.applyLspEditsToBuffer(i, resp.edits)
+                found = true
+                break
+            if found:
+              app.updateTitle()
+              app.updateStatus()
+              discard app.notificationManager.info("Document formatted")
+            else:
+              discard app.notificationManager.warning("Format response for closed buffer")
+        of lmkRename:
+          stderr.writeLine("[app] lmkRename received: changes=" & $resp.workspaceEdit.changes.len)
+          var applied = 0
+          for uri, edits in resp.workspaceEdit.changes:
+            let path = decodeFileUri(uri)
+            var idx = -1
+            for i in 0 ..< app.buffers.len:
+              if app.buffers[i].path == path:
+                idx = i
+                break
+            if idx < 0 and fileExists(path):
+              idx = app.openBuffer(path)
+            if idx >= 0:
+              app.applyLspEditsToBuffer(idx, edits)
+              inc applied
+          if applied > 0:
+            app.updateTitle()
+            app.updateStatus()
+            discard app.notificationManager.info("Renamed symbol in " & $applied & " file(s)")
+          else:
+            discard app.notificationManager.info("No rename changes applied")
+        of lmkReferences:
+          stderr.writeLine("[app] lmkReferences received: locations=" & $resp.locations.len)
+          if resp.locations.len > 0:
+            app.showLocationPicker(resp.locations)
+          else:
+            discard app.notificationManager.info("No references found")
+        of lmkDocumentSymbols:
+          stderr.writeLine("[app] lmkDocumentSymbols received: symbols=" & $resp.symbols.len)
+          if resp.symbols.len > 0:
+            app.showSymbolPicker(resp.str1, resp.symbols)
+          else:
+            discard app.notificationManager.info("No symbols found")
+        of lmkWorkspaceSymbols:
+          stderr.writeLine("[app] lmkWorkspaceSymbols received: symbols=" & $resp.symbols.len)
+          if resp.symbols.len > 0:
+            app.showSymbolPicker("", resp.symbols)
+          else:
+            discard app.notificationManager.info("No workspace symbols found")
         of lmkDiagnostics:
           stderr.writeLine("[app] lmkDiagnostics received")
           try:
@@ -2559,6 +3134,8 @@ proc run*(app: App) =
             else:
               try:
                 app.buffers[i].ed.loadFromFile(path)
+                app.buffers[i].lastSaveTick = getTicks()
+                app.buffers[i].lastChanged = false
               except CatchableError:
                 discard
             break
@@ -2648,17 +3225,21 @@ proc run*(app: App) =
         case edAct.kind
         of ctrlHover:
           if e.kind == MouseMoveEvent and app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and app.buffers[idx].path.len > 0:
-            if edAct.pos != app.hoverPendingPos:
-              app.hoverPendingPos = edAct.pos
-              let (line, col) = bufferPosToLineCol(app.buffers[idx].ed.fullText(), edAct.pos)
-              app.hoverPendingLine = line
-              app.hoverPendingCol = col
-              app.hoverPendingTick = getTicks() + 400
-              stderr.writeLine("[app] ctrlHover pending: pos=" & $edAct.pos & " line=" & $line & " col=" & $col)
+            let lang = languageIdFor(app.buffers[idx].path)
+            if lang == app.lspLanguage and app.lspServerForLanguage(lang).len > 0:
+              if edAct.pos != app.hoverPendingPos:
+                app.hoverPendingPos = edAct.pos
+                let (line, col) = bufferPosToLineCol(app.buffers[idx].ed.fullText(), edAct.pos)
+                app.hoverPendingLine = line
+                app.hoverPendingCol = col
+                app.hoverPendingTick = getTicks() + 400
+                stderr.writeLine("[app] ctrlHover pending: pos=" & $edAct.pos & " line=" & $line & " col=" & $col)
         of ctrlClick:
           if app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and app.buffers[idx].path.len > 0:
-            let (line, col) = bufferPosToLineCol(app.buffers[idx].ed.fullText(), edAct.pos)
-            app.lspThread.requestDefinition(app.buffers[idx].path, line, col)
+            let lang = languageIdFor(app.buffers[idx].path)
+            if lang == app.lspLanguage and app.lspServerForLanguage(lang).len > 0:
+              let (line, col) = bufferPosToLineCol(app.buffers[idx].ed.fullText(), edAct.pos)
+              app.lspThread.requestDefinition(app.buffers[idx].path, line, col)
         of noAction:
           if e.kind == MouseMoveEvent:
             # Mouse moved off a hoverable symbol: drop delayed trigger only.
@@ -2676,6 +3257,16 @@ proc run*(app: App) =
           app.bufferMarkers[idx].setMarkers(msColorHighlight, colors)
           applyMarkers(app.buffers[idx].ed, app.bufferMarkers[idx])
           applyLineDecorations(app, idx)
+
+        # Sync dirty state for tab modified indicator and title bar
+        if app.buffers[idx].ed.changed != app.buffers[idx].lastChanged:
+          app.buffers[idx].lastChanged = app.buffers[idx].ed.changed
+          app.tabBar.updateTabModified($idx, app.buffers[idx].ed.changed)
+          if idx == app.currentBuffer:
+            app.updateTitle()
+            app.updateStatus()
+        if app.buffers[idx].ed.changed:
+          app.buffers[idx].lastEditTick = getTicks()
 
         # Sticky scroll overlay
         let sticky = computeStickyLines(app.bufferLines[idx], ed.firstLine, 5)
@@ -2724,15 +3315,19 @@ proc run*(app: App) =
     if app.lspThread != nil and app.lspThread.isReady.load(moAcquire) and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len and app.buffers[app.currentBuffer].path.len > 0 and
        getTicks() >= app.hoverPendingTick:
       let idx = app.currentBuffer
-      stderr.writeLine("[app] hover trigger fired: pos=" & $app.hoverPendingPos & " line=" & $app.hoverPendingLine & " col=" & $app.hoverPendingCol & " mouse=(" & $app.mouseX & "," & $app.mouseY & ")")
-      app.lspThread.cancelHover()
-      inc app.hoverNextRequestId
-      app.lspThread.requestHover(app.buffers[idx].path, app.hoverPendingLine, app.hoverPendingCol, app.hoverNextRequestId)
-      app.hoverRequestId = app.hoverNextRequestId
-      app.hoverRequestPos = app.hoverPendingPos
-      app.hoverRequestPath = app.buffers[idx].path
-      app.hoverMouseX = app.mouseX
-      app.hoverMouseY = app.mouseY
+      let lang = languageIdFor(app.buffers[idx].path)
+      if lang == app.lspLanguage and app.lspServerForLanguage(lang).len > 0:
+        stderr.writeLine("[app] hover trigger fired: pos=" & $app.hoverPendingPos & " line=" & $app.hoverPendingLine & " col=" & $app.hoverPendingCol & " mouse=(" & $app.mouseX & "," & $app.mouseY & ")")
+        app.lspThread.cancelHover()
+        inc app.hoverNextRequestId
+        app.lspThread.requestHover(app.buffers[idx].path, app.hoverPendingLine, app.hoverPendingCol, app.hoverNextRequestId)
+        app.hoverRequestId = app.hoverNextRequestId
+        app.hoverRequestPos = app.hoverPendingPos
+        app.hoverRequestPath = app.buffers[idx].path
+        app.hoverMouseX = app.mouseX
+        app.hoverMouseY = app.mouseY
+      else:
+        app.clearPendingHover()
       app.hoverPendingTick = high(int)
 
     # Status bar

@@ -9,6 +9,11 @@ type
   LSPMessageKind* = enum
     lmkHover
     lmkDefinition
+    lmkFormat
+    lmkRename
+    lmkReferences
+    lmkDocumentSymbols
+    lmkWorkspaceSymbols
     lmkDidOpen
     lmkDidChange
     lmkDidClose
@@ -26,8 +31,12 @@ type
     int1*: int
     int2*: int
     hoverReqId*: int
+    range*: LSPRange
     locations*: seq[Location]
+    symbols*: seq[LSPSymbol]
     hoverText*: Option[string]
+    edits*: seq[LSPTextEdit]
+    workspaceEdit*: LSPWorkspaceEdit
     jsonData*: JsonNode  # For passing config
 
   LSPThread* = ref object
@@ -44,8 +53,9 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
   var initialMsg: LSPMessage
   if channel_spsc.tryReceive(t.reqChan, initialMsg):
     let serverName = initialMsg.str1
+    let language = if initialMsg.str2.len > 0: initialMsg.str2 else: "nim"
     let initOptions = if initialMsg.jsonData != nil: initialMsg.jsonData else: newJObject()
-    stderr.writeLine("[lsp-thread] starting server: " & serverName)
+    stderr.writeLine("[lsp-thread] starting server: " & serverName & " language: " & language)
     var client: LSPClient = nil
     const MaxBufferSize = 200
     var diagBuffer: seq[JsonNode] = @[]
@@ -56,7 +66,7 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
 
     proc runEventLoop() {.async.} =
       try:
-        client = await startLSP("nim", serverName, initOptions)
+        client = await startLSP(language, serverName, initOptions)
         stderr.writeLine("[lsp-thread] startLSP returned, ready=" & $client.isReady)
         if client.isReady:
           client.setDiagnosticsCallback(proc(j: JsonNode) =
@@ -86,6 +96,16 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
       var hoverFuture: Future[Option[string]] = nil
       var hoverRequestMeta: Option[LSPMessage] = none(LSPMessage)
       var definitionFuture: Future[seq[Location]] = nil
+      var formatFuture: Future[seq[LSPTextEdit]] = nil
+      var formatRequestMeta: Option[LSPMessage] = none(LSPMessage)
+      var renameFuture: Future[LSPWorkspaceEdit] = nil
+      var renameRequestMeta: Option[LSPMessage] = none(LSPMessage)
+      var referencesFuture: Future[seq[Location]] = nil
+      var referencesRequestMeta: Option[LSPMessage] = none(LSPMessage)
+      var documentSymbolsFuture: Future[seq[LSPSymbol]] = nil
+      var documentSymbolsRequestMeta: Option[LSPMessage] = none(LSPMessage)
+      var workspaceSymbolsFuture: Future[seq[LSPSymbol]] = nil
+      var workspaceSymbolsRequestMeta: Option[LSPMessage] = none(LSPMessage)
       var idleCount = 0
       const FastSleepMs = 1
       const SlowSleepMs = 16
@@ -107,12 +127,22 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
           var hasCancel = false
           var lastHover: Option[LSPMessage] = none(LSPMessage)
           var lastDef: Option[LSPMessage] = none(LSPMessage)
+          var lastFormat: Option[LSPMessage] = none(LSPMessage)
+          var lastRename: Option[LSPMessage] = none(LSPMessage)
+          var lastReferences: Option[LSPMessage] = none(LSPMessage)
+          var lastDocumentSymbols: Option[LSPMessage] = none(LSPMessage)
+          var lastWorkspaceSymbols: Option[LSPMessage] = none(LSPMessage)
 
           for m in reqBatch:
             if not running: break
             case m.kind
             of lmkHover: lastHover = some(m)
             of lmkDefinition: lastDef = some(m)
+            of lmkFormat: lastFormat = some(m)
+            of lmkRename: lastRename = some(m)
+            of lmkReferences: lastReferences = some(m)
+            of lmkDocumentSymbols: lastDocumentSymbols = some(m)
+            of lmkWorkspaceSymbols: lastWorkspaceSymbols = some(m)
             of lmkCancelHover: hasCancel = true
             of lmkShutdown: running = false
             of lmkDidOpen: asyncSpawn didOpen(client, m.str1, m.str2)
@@ -135,6 +165,35 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
             let d = lastDef.get()
             stderr.writeLine("[lsp-thread] processing definition request: " & d.str1 & " line=" & $d.int1 & " col=" & $d.int2)
             definitionFuture = definitionAsync(client, d.str1, d.int1, d.int2)
+          if running and lastFormat.isSome:
+            let f = lastFormat.get()
+            if f.range.start.line >= 0:
+              stderr.writeLine("[lsp-thread] processing range format request: " & f.str1)
+              formatFuture = rangeFormattingAsync(client, f.str1, f.range)
+            else:
+              stderr.writeLine("[lsp-thread] processing format request: " & f.str1)
+              formatFuture = formattingAsync(client, f.str1)
+            formatRequestMeta = some(f)
+          if running and lastRename.isSome:
+            let r = lastRename.get()
+            stderr.writeLine("[lsp-thread] processing rename request: " & r.str1 & " line=" & $r.int1 & " col=" & $r.int2)
+            renameFuture = renameAsync(client, r.str1, r.int1, r.int2, r.str2)
+            renameRequestMeta = some(r)
+          if running and lastReferences.isSome:
+            let r = lastReferences.get()
+            stderr.writeLine("[lsp-thread] processing references request: " & r.str1 & " line=" & $r.int1 & " col=" & $r.int2)
+            referencesFuture = referencesAsync(client, r.str1, r.int1, r.int2)
+            referencesRequestMeta = some(r)
+          if running and lastDocumentSymbols.isSome:
+            let d = lastDocumentSymbols.get()
+            stderr.writeLine("[lsp-thread] processing document symbols request: " & d.str1)
+            documentSymbolsFuture = documentSymbolAsync(client, d.str1)
+            documentSymbolsRequestMeta = some(d)
+          if running and lastWorkspaceSymbols.isSome:
+            let w = lastWorkspaceSymbols.get()
+            stderr.writeLine("[lsp-thread] processing workspace symbols request: query=" & w.str1)
+            workspaceSymbolsFuture = workspaceSymbolAsync(client, w.str1)
+            workspaceSymbolsRequestMeta = some(w)
           if running and lastHover.isSome:
             let h = lastHover.get()
             stderr.writeLine("[lsp-thread] processing hover request: id=" & $h.hoverReqId & " " & h.str1 & " line=" & $h.int1 & " col=" & $h.int2)
@@ -170,6 +229,51 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
           t.sendResponse(LSPMessage(kind: lmkDefinition, locations: locs))
           definitionFuture = nil
 
+        if formatFuture != nil and formatFuture.finished:
+          hadFlushWork = true
+          let edits = formatFuture.read()
+          let reqMeta = if formatRequestMeta.isSome: formatRequestMeta.get() else: LSPMessage(kind: lmkFormat)
+          stderr.writeLine("[lsp-thread] format response ready: edits=" & $edits.len)
+          t.sendResponse(LSPMessage(kind: lmkFormat, str1: reqMeta.str1, edits: edits))
+          formatFuture = nil
+          formatRequestMeta = none(LSPMessage)
+
+        if renameFuture != nil and renameFuture.finished:
+          hadFlushWork = true
+          let wsEdit = renameFuture.read()
+          let reqMeta = if renameRequestMeta.isSome: renameRequestMeta.get() else: LSPMessage(kind: lmkRename)
+          stderr.writeLine("[lsp-thread] rename response ready: changes=" & $wsEdit.changes.len)
+          t.sendResponse(LSPMessage(kind: lmkRename, str1: reqMeta.str1, workspaceEdit: wsEdit))
+          renameFuture = nil
+          renameRequestMeta = none(LSPMessage)
+
+        if referencesFuture != nil and referencesFuture.finished:
+          hadFlushWork = true
+          let locs = referencesFuture.read()
+          let reqMeta = if referencesRequestMeta.isSome: referencesRequestMeta.get() else: LSPMessage(kind: lmkReferences)
+          stderr.writeLine("[lsp-thread] references response ready: locs=" & $locs.len)
+          t.sendResponse(LSPMessage(kind: lmkReferences, str1: reqMeta.str1, locations: locs))
+          referencesFuture = nil
+          referencesRequestMeta = none(LSPMessage)
+
+        if documentSymbolsFuture != nil and documentSymbolsFuture.finished:
+          hadFlushWork = true
+          let symbols = documentSymbolsFuture.read()
+          let reqMeta = if documentSymbolsRequestMeta.isSome: documentSymbolsRequestMeta.get() else: LSPMessage(kind: lmkDocumentSymbols)
+          stderr.writeLine("[lsp-thread] document symbols response ready: symbols=" & $symbols.len)
+          t.sendResponse(LSPMessage(kind: lmkDocumentSymbols, str1: reqMeta.str1, symbols: symbols))
+          documentSymbolsFuture = nil
+          documentSymbolsRequestMeta = none(LSPMessage)
+
+        if workspaceSymbolsFuture != nil and workspaceSymbolsFuture.finished:
+          hadFlushWork = true
+          let symbols = workspaceSymbolsFuture.read()
+          let reqMeta = if workspaceSymbolsRequestMeta.isSome: workspaceSymbolsRequestMeta.get() else: LSPMessage(kind: lmkWorkspaceSymbols)
+          stderr.writeLine("[lsp-thread] workspace symbols response ready: symbols=" & $symbols.len)
+          t.sendResponse(LSPMessage(kind: lmkWorkspaceSymbols, str1: reqMeta.str1, symbols: symbols))
+          workspaceSymbolsFuture = nil
+          workspaceSymbolsRequestMeta = none(LSPMessage)
+
         if diagBuffer.len > 0 or msgBuffer.len > 0:
           hadFlushWork = true
           var diags = diagBuffer
@@ -193,13 +297,13 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
 
     waitFor runEventLoop()
 
-proc newLSPThread*(serverName: string = "minlsp", initOptions: JsonNode = nil): LSPThread =
+proc newLSPThread*(serverName: string = "minlsp"; language: string = "nim"; initOptions: JsonNode = nil): LSPThread =
   result = LSPThread()
   result.reqChan = newSPSChannel[LSPMessage](64)
   result.respChan = newSPSChannel[LSPMessage](256)
   createThread(result.thread, lspThreadProc, result)
   let opts = if initOptions != nil: initOptions else: newJObject()
-  let initMsg = LSPMessage(kind: lmkReady, str1: serverName, jsonData: opts)
+  let initMsg = LSPMessage(kind: lmkReady, str1: serverName, str2: language, jsonData: opts)
   if not channel_spsc.trySend(result.reqChan, initMsg):
     stderr.writeLine("[lsp-thread] FATAL: failed to send initial server name to LSP thread")
 
@@ -219,6 +323,30 @@ proc requestHover*(t: LSPThread; path: string; line, col: int; requestId: int = 
 proc requestDefinition*(t: LSPThread; path: string; line, col: int) =
   stderr.writeLine("[lsp-thread] requestDefinition queued: " & path & " line=" & $line & " col=" & $col)
   t.queueRequest(LSPMessage(kind: lmkDefinition, str1: path, int1: line, int2: col))
+
+proc requestFormatting*(t: LSPThread; path: string) =
+  stderr.writeLine("[lsp-thread] requestFormatting queued: " & path)
+  t.queueRequest(LSPMessage(kind: lmkFormat, str1: path))
+
+proc requestRangeFormatting*(t: LSPThread; path: string; range: LSPRange) =
+  stderr.writeLine("[lsp-thread] requestRangeFormatting queued: " & path)
+  t.queueRequest(LSPMessage(kind: lmkFormat, str1: path, range: range))
+
+proc requestRename*(t: LSPThread; path: string; line, col: int; newName: string) =
+  stderr.writeLine("[lsp-thread] requestRename queued: " & path & " line=" & $line & " col=" & $col)
+  t.queueRequest(LSPMessage(kind: lmkRename, str1: path, int1: line, int2: col, str2: newName))
+
+proc requestReferences*(t: LSPThread; path: string; line, col: int) =
+  stderr.writeLine("[lsp-thread] requestReferences queued: " & path & " line=" & $line & " col=" & $col)
+  t.queueRequest(LSPMessage(kind: lmkReferences, str1: path, int1: line, int2: col))
+
+proc requestDocumentSymbols*(t: LSPThread; path: string) =
+  stderr.writeLine("[lsp-thread] requestDocumentSymbols queued: " & path)
+  t.queueRequest(LSPMessage(kind: lmkDocumentSymbols, str1: path))
+
+proc requestWorkspaceSymbols*(t: LSPThread; query: string) =
+  stderr.writeLine("[lsp-thread] requestWorkspaceSymbols queued: query=" & query)
+  t.queueRequest(LSPMessage(kind: lmkWorkspaceSymbols, str1: query))
 
 proc notifyDidOpen*(t: LSPThread; path, content: string) =
   t.queueRequest(LSPMessage(kind: lmkDidOpen, str1: path, str2: content))

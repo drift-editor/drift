@@ -13,6 +13,7 @@ type
     path*: string
     bookmark*: string ## base64-encoded bookmark on macOS, empty elsewhere
     isFolder*: bool
+    pinned*: bool      ## transient UI flag; not persisted in recent_files.json
 
 proc getRecentFilesPath*(): string =
   ## Get the path to store recent files configuration.
@@ -116,6 +117,42 @@ proc recentItems*(files: seq[RecentFileEntry]): seq[tuple[path: string, isFolder
   result = newSeq[tuple[path: string, isFolder: bool]](files.len)
   for i, f in files:
     result[i] = (path: f.path, isFolder: f.isFolder)
+
+proc pinRecentFile*(files: seq[RecentFileEntry], path: string): seq[RecentFileEntry] =
+  ## Mark the entry for `path` as pinned and move it to the front of the list.
+  ## If `path` is not already present, a new file entry is created.
+  var pinnedEntry: RecentFileEntry
+  var found = false
+  for f in files:
+    if f.path == path:
+      pinnedEntry = f
+      pinnedEntry.pinned = true
+      found = true
+      break
+  if not found:
+    pinnedEntry = RecentFileEntry(path: path, pinned: true)
+  result = @[pinnedEntry]
+  for f in files:
+    if f.path != path and result.len < MaxRecentFiles:
+      result.add(f)
+
+proc unpinRecentFile*(files: seq[RecentFileEntry], path: string): seq[RecentFileEntry] =
+  ## Remove the pinned flag from the entry for `path`.
+  result = @[]
+  for f in files:
+    if f.path == path:
+      var e = f
+      e.pinned = false
+      result.add(e)
+    else:
+      result.add(f)
+
+proc isPinned*(files: seq[RecentFileEntry], path: string): bool =
+  ## Return true if the entry for `path` is marked as pinned.
+  for f in files:
+    if f.path == path:
+      return f.pinned
+  false
 
 proc startAccessingRecentFile*(files: seq[RecentFileEntry], filePath: string): bool =
   ## Prepare to open a recent file. On macOS this resolves the security-scoped

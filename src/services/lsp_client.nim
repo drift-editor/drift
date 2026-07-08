@@ -1,7 +1,7 @@
 ## Simplified async LSP client for Drift
 ## Uses chronos + lsp_client's LspNimEndpoint directly
 
-import std/[options, os, json, tables, strutils]
+import std/[options, os, json, tables, strutils, algorithm]
 import chronos
 import chronos/asyncproc
 import lsp_client/nim_lsp_endpoint
@@ -38,6 +38,19 @@ type
     lastHoverRequestId: int
 
   LSPClient* = ref LSPClientObj
+
+  LSPTextEdit* = object
+    range*: LSPRange
+    newText*: string
+
+  LSPWorkspaceEdit* = object
+    changes*: Table[string, seq[LSPTextEdit]]
+
+  LSPSymbol* = object
+    name*: string
+    kind*: int
+    uri*: string
+    range*: LSPRange
 
 proc cancelHover*(client: LSPClient) =
   if client.lastHoverRequestId > 0:
@@ -521,3 +534,250 @@ proc definitionAsync*(client: LSPClient; path: string; line, col: int): Future[s
       stderr.writeLine("[lsp-client] definitionAsync result is null or missing")
   except CatchableError as e:
     stderr.writeLine("[lsp-client] definitionAsync exception: " & e.msg)
+
+# Formatting
+
+proc formattingAsync*(client: LSPClient; path: string): Future[seq[LSPTextEdit]] {.async.} =
+  ## Request `textDocument/formatting` for the given file path.
+  ## Returns a sequence of LSP text edits to apply, or empty if none.
+  result = @[]
+  if not client.isReady:
+    return
+  let uri = toFileUri(path)
+  let params = %*{
+    "textDocument": { "uri": uri },
+    "options": { "tabSize": 2, "insertSpaces": true }
+  }
+  try:
+    let resp = await client.sendRequest("textDocument/formatting", params)
+    if resp.hasKey("result") and resp["result"].kind == JArray:
+      for item in resp["result"]:
+        if item.hasKey("range") and item.hasKey("newText"):
+          let range = item["range"]
+          let newText = item["newText"].getStr()
+          result.add(LSPTextEdit(
+            range: LSPRange(
+              start: LSPPosition(
+                line: range["start"]["line"].getInt(),
+                character: range["start"]["character"].getInt()
+              ),
+              `end`: LSPPosition(
+                line: range["end"]["line"].getInt(),
+                character: range["end"]["character"].getInt()
+              )
+            ),
+            newText: newText
+          ))
+  except CatchableError as e:
+    stderr.writeLine("[lsp-client] formattingAsync exception: " & e.msg)
+
+proc rangeFormattingAsync*(client: LSPClient; path: string; range: LSPRange): Future[seq[LSPTextEdit]] {.async.} =
+  ## Request `textDocument/rangeFormatting` for the given file path and range.
+  ## Returns a sequence of LSP text edits to apply, or empty if none.
+  result = @[]
+  if not client.isReady:
+    return
+  let uri = toFileUri(path)
+  let params = %*{
+    "textDocument": { "uri": uri },
+    "range": {
+      "start": { "line": range.start.line, "character": range.start.character },
+      "end": { "line": range.end.line, "character": range.end.character }
+    },
+    "options": { "tabSize": 2, "insertSpaces": true }
+  }
+  try:
+    let resp = await client.sendRequest("textDocument/rangeFormatting", params)
+    if resp.hasKey("result") and resp["result"].kind == JArray:
+      for item in resp["result"]:
+        if item.hasKey("range") and item.hasKey("newText"):
+          let itemRange = item["range"]
+          let newText = item["newText"].getStr()
+          result.add(LSPTextEdit(
+            range: LSPRange(
+              start: LSPPosition(
+                line: itemRange["start"]["line"].getInt(),
+                character: itemRange["start"]["character"].getInt()
+              ),
+              `end`: LSPPosition(
+                line: itemRange["end"]["line"].getInt(),
+                character: itemRange["end"]["character"].getInt()
+              )
+            ),
+            newText: newText
+          ))
+  except CatchableError as e:
+    stderr.writeLine("[lsp-client] rangeFormattingAsync exception: " & e.msg)
+
+# Rename
+
+proc renameAsync*(client: LSPClient; path: string; line, col: int; newName: string): Future[LSPWorkspaceEdit] {.async.} =
+  ## Request `textDocument/rename` for the symbol at the given position.
+  ## Returns a workspace edit with document changes to apply.
+  result.changes = initTable[string, seq[LSPTextEdit]]()
+  if not client.isReady:
+    return
+  let uri = toFileUri(path)
+  let params = %*{
+    "textDocument": { "uri": uri },
+    "position": { "line": line, "character": col },
+    "newName": newName
+  }
+  try:
+    let resp = await client.sendRequest("textDocument/rename", params)
+    if resp.hasKey("result") and resp["result"].kind == JObject:
+      let resultData = resp["result"]
+      if resultData.hasKey("changes") and resultData["changes"].kind == JObject:
+        for uriKey, editsNode in resultData["changes"]:
+          var edits: seq[LSPTextEdit] = @[]
+          if editsNode.kind == JArray:
+            for item in editsNode:
+              if item.hasKey("range") and item.hasKey("newText"):
+                let range = item["range"]
+                edits.add(LSPTextEdit(
+                  range: LSPRange(
+                    start: LSPPosition(
+                      line: range["start"]["line"].getInt(),
+                      character: range["start"]["character"].getInt()
+                    ),
+                    `end`: LSPPosition(
+                      line: range["end"]["line"].getInt(),
+                      character: range["end"]["character"].getInt()
+                    )
+                  ),
+                  newText: item["newText"].getStr()
+                ))
+          if edits.len > 0:
+            result.changes[uriKey] = edits
+  except CatchableError as e:
+    stderr.writeLine("[lsp-client] renameAsync exception: " & e.msg)
+
+# References
+
+proc referencesAsync*(client: LSPClient; path: string; line, col: int): Future[seq[Location]] {.async.} =
+  ## Request `textDocument/references` for the symbol at the given position.
+  result = @[]
+  if not client.isReady:
+    return
+  let uri = toFileUri(path)
+  let params = %*{
+    "textDocument": { "uri": uri },
+    "position": { "line": line, "character": col },
+    "context": { "includeDeclaration": true }
+  }
+  try:
+    let resp = await client.sendRequest("textDocument/references", params)
+    if resp.hasKey("result") and resp["result"].kind == JArray:
+      for item in resp["result"]:
+        if item.hasKey("uri") and item.hasKey("range"):
+          let range = item["range"]
+          result.add(Location(
+            uri: item["uri"].getStr(),
+            range: LSPRange(
+              start: LSPPosition(
+                line: range["start"]["line"].getInt(),
+                character: range["start"]["character"].getInt()
+              ),
+              `end`: LSPPosition(
+                line: range["end"]["line"].getInt(),
+                character: range["end"]["character"].getInt()
+              )
+            )
+          ))
+  except CatchableError as e:
+    stderr.writeLine("[lsp-client] referencesAsync exception: " & e.msg)
+
+proc parseSymbolRange(item: JsonNode): LSPRange =
+  let rangeNode = if item.hasKey("range"): item["range"] elif item.hasKey("location") and item["location"].hasKey("range"): item["location"]["range"] else: newJObject()
+  if rangeNode.hasKey("start") and rangeNode.hasKey("end"):
+    result.start = LSPPosition(
+      line: rangeNode["start"]["line"].getInt(),
+      character: rangeNode["start"]["character"].getInt()
+    )
+    result.`end` = LSPPosition(
+      line: rangeNode["end"]["line"].getInt(),
+      character: rangeNode["end"]["character"].getInt()
+    )
+
+proc documentSymbolAsync*(client: LSPClient; path: string): Future[seq[LSPSymbol]] {.async.} =
+  ## Request `textDocument/documentSymbol` for the given file path.
+  result = @[]
+  if not client.isReady:
+    return
+  let uri = toFileUri(path)
+  let params = %*{ "textDocument": { "uri": uri } }
+  try:
+    let resp = await client.sendRequest("textDocument/documentSymbol", params)
+    if resp.hasKey("result") and resp["result"].kind == JArray:
+      for item in resp["result"]:
+        if item.hasKey("name"):
+          result.add(LSPSymbol(
+            name: item["name"].getStr(),
+            kind: if item.hasKey("kind"): item["kind"].getInt() else: 0,
+            uri: uri,
+            range: parseSymbolRange(item)
+          ))
+  except CatchableError as e:
+    stderr.writeLine("[lsp-client] documentSymbolAsync exception: " & e.msg)
+
+proc workspaceSymbolAsync*(client: LSPClient; query: string): Future[seq[LSPSymbol]] {.async.} =
+  ## Request `workspace/symbol` with the given query string.
+  result = @[]
+  if not client.isReady:
+    return
+  let params = %*{ "query": query }
+  try:
+    let resp = await client.sendRequest("workspace/symbol", params)
+    if resp.hasKey("result") and resp["result"].kind == JArray:
+      for item in resp["result"]:
+        if item.hasKey("name"):
+          let uri = if item.hasKey("location") and item["location"].hasKey("uri"): item["location"]["uri"].getStr() else: ""
+          result.add(LSPSymbol(
+            name: item["name"].getStr(),
+            kind: if item.hasKey("kind"): item["kind"].getInt() else: 0,
+            uri: uri,
+            range: parseSymbolRange(item)
+          ))
+  except CatchableError as e:
+    stderr.writeLine("[lsp-client] workspaceSymbolAsync exception: " & e.msg)
+
+# Apply workspace edit helper
+
+proc offsetAtLineCol*(text: string; line, col: int): int =
+  ## Convert 0-based line/col to byte offset in text using LF line endings.
+  var curLine = 0
+  var curCol = 0
+  while result < text.len:
+    if curLine == line and curCol == col:
+      break
+    if text[result] == '\L':
+      inc curLine
+      curCol = 0
+    else:
+      inc curCol
+    inc result
+
+proc applyTextEdits*(fullText: string; edits: seq[LSPTextEdit]): string =
+  ## Apply LSP text edits to a full document string in reverse order.
+  result = fullText
+  var sorted = edits
+  sorted.sort(proc(a, b: LSPTextEdit): int =
+    let lineCmp = cmp(b.range.start.line, a.range.start.line)
+    if lineCmp != 0: return lineCmp
+    cmp(b.range.start.character, a.range.start.character))
+  for ed in sorted:
+    let startOffset = offsetAtLineCol(result, ed.range.start.line, ed.range.start.character)
+    let endOffset = offsetAtLineCol(result, ed.range.end.line, ed.range.end.character)
+    result = result[0 ..< startOffset] & ed.newText & result[endOffset ..< result.len]
+
+proc lineColAtOffset*(text: string; offset: int): tuple[line, col: int] =
+  var pos = 0
+  result.line = 0
+  result.col = 0
+  while pos < offset and pos < text.len:
+    if text[pos] == '\L':
+      inc result.line
+      result.col = 0
+    else:
+      inc result.col
+    inc pos

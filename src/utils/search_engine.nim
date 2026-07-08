@@ -12,6 +12,16 @@ type
     stFindstr
     stFallback
 
+  WorkspaceSearchArgs* = object
+    ## Input bundle passed to the background workspace-search thread.
+    findText*: string
+    workspaceRoot*: string
+    caseSensitive*: bool
+    useRegex*: bool
+    excludedDirs*: seq[string]
+    excludedExts*: seq[string]
+    chan*: ptr Channel[string]
+
 const
   DefaultExcludedDirs* = [".git", "node_modules", ".nimble", "dist", "build", ".cache"]
   DefaultExcludedExts* = [".exe", ".dll", ".so", ".dylib", ".png", ".jpg", ".jpeg",
@@ -231,3 +241,19 @@ proc fallbackFindFiles*(pattern, workspaceRoot: string;
     if relPath.matchGlobPattern(pattern):
       if result.len > 0: result.add("\n")
       result.add(relPath)
+
+proc workspaceSearchThreadProc*(args: WorkspaceSearchArgs) {.thread.} =
+  ## Runs the configured search command (or the pure-Nim fallback) in a
+  ## background thread and sends the raw output back through ``args.chan``.
+  let cmd = buildSearchTextCmd(args.findText, args.workspaceRoot,
+                               args.caseSensitive, args.useRegex,
+                               args.excludedDirs, args.excludedExts)
+  var output = ""
+  if cmd.len > 0:
+    let (outStr, _) = execCmdEx(cmd, workingDir = args.workspaceRoot)
+    output = outStr
+  else:
+    output = fallbackSearchText(args.findText, args.workspaceRoot,
+                                args.caseSensitive, args.useRegex,
+                                args.excludedDirs, args.excludedExts)
+  args.chan[].send(output)

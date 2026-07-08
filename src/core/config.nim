@@ -1,7 +1,7 @@
 ## Configuration loader
 ## Loads user settings from ~/.config/drift/config.json
 
-import std/[os, json, strutils]
+import std/[os, json, strutils, tables]
 
 type
   AppConfig* = object
@@ -14,7 +14,9 @@ type
     autoIndent*: bool
     bracketHighlight*: bool
     autoCloseBrackets*: bool
+    showLineNumbers*: bool
     lspServer*: string
+    lspServers*: Table[string, string]  # Per-language LSP server executables
     lspConfig*: JsonNode  # Server-specific LSP configuration
     dapServer*: string
     dapConfig*: JsonNode  # Server-specific DAP configuration
@@ -33,6 +35,18 @@ type
     aiHeavyweightModel*: string
     aiEnabledModels*: seq[string]  # Empty = all enabled; format "providerId/model"
     aiReasoningEffort*: string  # Thinking-mode effort variant for capable providers: "high" (default) or "max"
+    # Phase 1: editor fit-and-finish
+    autoSave*: string
+    autoSaveDelayMs*: int
+    fileWatcherAutoReload*: bool
+    closedTabHistorySize*: int
+    clipboardHistorySize*: int
+    pinnedRecentFiles*: seq[string]
+    searchCaseSensitive*: bool
+    searchUseRegex*: bool
+    searchWholeWord*: bool
+    searchRememberOptions*: bool
+    searchHistory*: seq[string]
 
 proc configDir*(): string =
   getConfigDir() / "drift"
@@ -50,7 +64,9 @@ proc defaultConfig*(): AppConfig =
     autoIndent: true,
     bracketHighlight: true,
     autoCloseBrackets: true,
+    showLineNumbers: true,
     lspServer: "minlsp",
+    lspServers: {"nim": "minlsp"}.toTable(),
     lspConfig: newJObject(),
     dapServer: "nim_debug_adapter",
     dapConfig: newJObject(),
@@ -65,7 +81,18 @@ proc defaultConfig*(): AppConfig =
     aiLightweightModel: "deepseek-v4-flash",
     aiHeavyweightModelProvider: "deepseek",
     aiHeavyweightModel: "deepseek-v4-pro",
-    aiReasoningEffort: "high"
+    aiReasoningEffort: "high",
+    autoSave: "off",
+    autoSaveDelayMs: 1000,
+    fileWatcherAutoReload: true,
+    closedTabHistorySize: 20,
+    clipboardHistorySize: 10,
+    pinnedRecentFiles: @[],
+    searchCaseSensitive: false,
+    searchUseRegex: false,
+    searchWholeWord: false,
+    searchRememberOptions: true,
+    searchHistory: @[]
   )
 
 proc loadConfig*(): AppConfig =
@@ -93,8 +120,15 @@ proc loadConfig*(): AppConfig =
       result.bracketHighlight = j["bracketHighlight"].getBool()
     if j.hasKey("autoCloseBrackets"):
       result.autoCloseBrackets = j["autoCloseBrackets"].getBool()
+    if j.hasKey("showLineNumbers"):
+      result.showLineNumbers = j["showLineNumbers"].getBool()
     if j.hasKey("lspServer"):
       result.lspServer = j["lspServer"].getStr()
+    if j.hasKey("lspServers") and j["lspServers"].kind == JObject:
+      result.lspServers = initTable[string, string]()
+      for key, val in j["lspServers"]:
+        if val.kind == JString:
+          result.lspServers[key] = val.getStr()
     if j.hasKey("lspConfig"):
       result.lspConfig = j["lspConfig"]
     else:
@@ -140,6 +174,34 @@ proc loadConfig*(): AppConfig =
       let eff = j["aiReasoningEffort"].getStr().toLowerAscii()
       if eff == "high" or eff == "max":
         result.aiReasoningEffort = eff
+    if j.hasKey("autoSave"):
+      result.autoSave = j["autoSave"].getStr()
+    if j.hasKey("autoSaveDelayMs"):
+      result.autoSaveDelayMs = j["autoSaveDelayMs"].getInt()
+    if j.hasKey("fileWatcherAutoReload"):
+      result.fileWatcherAutoReload = j["fileWatcherAutoReload"].getBool()
+    if j.hasKey("closedTabHistorySize"):
+      result.closedTabHistorySize = j["closedTabHistorySize"].getInt()
+    if j.hasKey("clipboardHistorySize"):
+      result.clipboardHistorySize = j["clipboardHistorySize"].getInt()
+    if j.hasKey("pinnedRecentFiles") and j["pinnedRecentFiles"].kind == JArray:
+      result.pinnedRecentFiles = @[]
+      for item in j["pinnedRecentFiles"]:
+        if item.kind == JString:
+          result.pinnedRecentFiles.add(item.getStr())
+    if j.hasKey("searchCaseSensitive"):
+      result.searchCaseSensitive = j["searchCaseSensitive"].getBool()
+    if j.hasKey("searchUseRegex"):
+      result.searchUseRegex = j["searchUseRegex"].getBool()
+    if j.hasKey("searchWholeWord"):
+      result.searchWholeWord = j["searchWholeWord"].getBool()
+    if j.hasKey("searchRememberOptions"):
+      result.searchRememberOptions = j["searchRememberOptions"].getBool()
+    if j.hasKey("searchHistory") and j["searchHistory"].kind == JArray:
+      result.searchHistory = @[]
+      for item in j["searchHistory"]:
+        if item.kind == JString:
+          result.searchHistory.add(item.getStr())
   except CatchableError:
     discard
 
@@ -170,6 +232,9 @@ proc effectiveBuiltinModel*(config: AppConfig): tuple[provider, model: string] =
 
 proc saveConfig*(config: AppConfig) =
   createDir(configDir())
+  var lspServersJ = newJObject()
+  for key, val in config.lspServers:
+    lspServersJ[key] = %val
   let j = %*{
     "windowWidth": config.windowWidth,
     "windowHeight": config.windowHeight,
@@ -179,7 +244,9 @@ proc saveConfig*(config: AppConfig) =
     "autoIndent": config.autoIndent,
     "bracketHighlight": config.bracketHighlight,
     "autoCloseBrackets": config.autoCloseBrackets,
+    "showLineNumbers": config.showLineNumbers,
     "lspServer": config.lspServer,
+    "lspServers": lspServersJ,
     "lspConfig": config.lspConfig,
     "dapServer": config.dapServer,
     "dapConfig": config.dapConfig,
@@ -197,6 +264,17 @@ proc saveConfig*(config: AppConfig) =
     "aiHeavyweightModelProvider": config.aiHeavyweightModelProvider,
     "aiHeavyweightModel": config.aiHeavyweightModel,
     "aiEnabledModels": config.aiEnabledModels,
-    "aiReasoningEffort": config.aiReasoningEffort
+    "aiReasoningEffort": config.aiReasoningEffort,
+    "autoSave": config.autoSave,
+    "autoSaveDelayMs": config.autoSaveDelayMs,
+    "fileWatcherAutoReload": config.fileWatcherAutoReload,
+    "closedTabHistorySize": config.closedTabHistorySize,
+    "clipboardHistorySize": config.clipboardHistorySize,
+    "pinnedRecentFiles": config.pinnedRecentFiles,
+    "searchCaseSensitive": config.searchCaseSensitive,
+    "searchUseRegex": config.searchUseRegex,
+    "searchWholeWord": config.searchWholeWord,
+    "searchRememberOptions": config.searchRememberOptions,
+    "searchHistory": config.searchHistory
   }
   writeFile(configPath(), $j & "\n")

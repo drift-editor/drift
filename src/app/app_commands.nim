@@ -105,11 +105,18 @@ template initCommands*(app: untyped): untyped =
       app.commandPalette.show()
       if app.tooltip.visible: app.tooltip.hideTooltip()
 
-    # Theme selector
-    app.commands.bindKey({CtrlPressed, ShiftPressed}, KeyT, "theme.selector")
+    # Theme selector (no default keybinding; shortcut reused for reopen closed tab)
     app.commands.register("theme.selector") do ():
       app.themeSelector.show(app.config.themeName)
       if app.tooltip.visible: app.tooltip.hideTooltip()
+
+    app.commands.bindKey({CtrlPressed, ShiftPressed}, KeyT, "file.reopenClosedTab")
+    app.commands.register("file.reopenClosedTab") do ():
+      if app.closedTabs.len > 0:
+        let info = app.closedTabs.pop()
+        let idx = app.openBuffer(info.path)
+        if idx >= 0 and idx < app.buffers.len:
+          app.buffers[idx].ed.gotoLine(info.line + 1, info.col)
 
     # AI Review Changes
     app.commands.register("ai.reviewChanges") do ():
@@ -156,6 +163,44 @@ template initCommands*(app: untyped): untyped =
     app.commands.bindKey({CtrlPressed}, KeyL, "edit.selectLine")
     app.commands.register("edit.selectLine") do ():
       withEd: ed.selectLine()
+
+    app.commands.bindKey({CtrlPressed}, KeyD, "edit.duplicateSelection")
+    app.commands.register("edit.duplicateSelection") do ():
+      withEd:
+        let sel = ed.getSelectedText()
+        if sel.len > 0:
+          ed.insertText(sel & sel)
+        else:
+          ed.duplicateLine()
+
+    app.commands.bindKey({CtrlPressed}, KeyC, "edit.copy")
+    app.commands.register("edit.copy") do ():
+      withEd:
+        let text = ed.getSelectedText()
+        if text.len > 0:
+          putClipboardText(text)
+          app.pushClipboardHistory(text)
+
+    app.commands.bindKey({CtrlPressed}, KeyX, "edit.cut")
+    app.commands.register("edit.cut") do ():
+      withEd:
+        let text = ed.getSelectedText()
+        if text.len > 0:
+          putClipboardText(text)
+          app.pushClipboardHistory(text)
+          ed.insertText("")
+
+    app.commands.bindKey({CtrlPressed, ShiftPressed}, KeyV, "edit.cycleClipboard")
+    app.commands.register("edit.cycleClipboard") do ():
+      withEd:
+        if app.clipboardHistory.len == 0:
+          let clip = getClipboardText()
+          if clip.len > 0:
+            app.pushClipboardHistory(clip)
+        if app.clipboardHistory.len > 0:
+          let idx = app.clipboardHistoryIndex mod app.clipboardHistory.len
+          ed.insertText(app.clipboardHistory[idx])
+          app.clipboardHistoryIndex = (app.clipboardHistoryIndex + 1) mod app.clipboardHistory.len
 
     app.commands.bindKey({CtrlPressed}, KeyG, "navigate.gotoLine")
     app.commands.register("navigate.gotoLine") do ():

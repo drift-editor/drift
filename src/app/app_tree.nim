@@ -176,14 +176,15 @@ template buildEditorRoot*(app, layout): Node =
       searchNode.onMouseDown = proc(n: Node, e: Event): bool =
         app.focus = "search"
         let ed = if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len: addr app.buffers[app.currentBuffer].ed else: nil
-        return app.searchPanel.handleMouse(ed, e, n.bounds)
+        return app.searchPanel.handleMouse(ed, e, n.bounds, proc(msg: string) =
+          discard app.notificationManager.success(msg))
       searchNode.onMouseMove = proc(n: Node, e: Event): bool =
         let ed = if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len: addr app.buffers[app.currentBuffer].ed else: nil
-        discard app.searchPanel.handleMouse(ed, e, n.bounds)
+        discard app.searchPanel.handleMouse(ed, e, n.bounds, proc(msg: string) = discard)
         false
       searchNode.onMouseWheel = proc(n: Node, e: Event): bool =
         let ed = if app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len: addr app.buffers[app.currentBuffer].ed else: nil
-        return app.searchPanel.handleMouse(ed, e, n.bounds)
+        return app.searchPanel.handleMouse(ed, e, n.bounds, proc(msg: string) = discard)
       searchNode.setCursorResolver(proc(n: Node, x, y: int): CursorKind =
         if app.searchPanel.hoverInput: curIbeam
         elif app.searchPanel.hoveredButton >= 0 or app.searchPanel.hoveredGroupIndex >= 0 or app.searchPanel.hoveredResult >= 0: curHand

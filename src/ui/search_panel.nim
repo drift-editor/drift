@@ -1,11 +1,12 @@
 ## Search/Replace Panel - Sidebar integrated
-import std/[os, strutils, nre, tables, osproc, locks]
+import std/[os, strutils, nre, tables, locks, typedthreads, sequtils]
 import uirelays
 import uirelays/[coords, screen, input]
 import widgets/synedit
 import ../widgets/widgets
 import theme, icons
 import ../utils/search_engine
+import ../core/config
 
 const
   HEADER_HEIGHT = 28
@@ -57,6 +58,9 @@ type
     workspaceRoot*: string = ""
     workspaceSearchInProgress*: bool = false
     workspaceSearchLock*: Lock
+    # async workspace search thread
+    workspaceSearchThread*: Thread[WorkspaceSearchArgs]
+    workspaceSearchChan*: Channel[string]
     # shared UI state
     focus*: int = 0
     findCursor*: int = 0
@@ -76,8 +80,14 @@ type
     # cursor blink
     cursorVisible*: bool = true
     lastBlinkTick*: int = 0
+    # search history
+    searchHistory*: seq[string] = @[]
+    historyIndex*: int = 0
     # callback
     onWorkspaceResultClick*: proc(path: string; line, col: int)
+
+  OnWorkspaceResultClick* = proc(path: string; line, col: int)
+    ## Callback type invoked when the user selects a workspace search result.
 
 const markerBg = color(55, 60, 45, 255)
 const matchHighlightColor = color(234, 154, 40, 255)
@@ -103,13 +113,110 @@ proc newSearchPanel*(font: Font; fm: FontMetrics): SearchPanel =
     hoveredButton: -1,
     hoveredResult: -1,
     hoveredGroupIndex: -1,
-    cursorVisible: true
+    cursorVisible: true,
+    historyIndex: 0
   )
   initLock(result.workspaceSearchLock)
+  result.workspaceSearchChan.open()
+
+proc loadSearchState*(panel: var SearchPanel; config: AppConfig) =
+  ## Populate search options and initial query from ``config``.
+  panel.caseSensitive = config.searchCaseSensitive
+  panel.useRegex = config.searchUseRegex
+  panel.wholeWord = config.searchWholeWord
+  if config.searchHistory.len > 0:
+    panel.searchHistory = config.searchHistory
+    panel.historyIndex = panel.searchHistory.high
+  if config.searchRememberOptions and panel.searchHistory.len > 0:
+    panel.findText = panel.searchHistory[^1]
+    panel.findCursor = panel.findText.len
+
+proc saveSearchState*(panel: SearchPanel; config: var AppConfig) =
+  ## Write current search options and history back to ``config``.
+  config.searchCaseSensitive = panel.caseSensitive
+  config.searchUseRegex = panel.useRegex
+  config.searchWholeWord = panel.wholeWord
+  config.searchHistory = panel.searchHistory
+
+proc newSearchPanel*(font: Font; fm: FontMetrics; config: AppConfig): SearchPanel =
+  result = newSearchPanel(font, fm)
+  loadSearchState(result, config)
+
+proc pushSearchHistory*(panel: var SearchPanel; text: string) =
+  ## Add ``text`` to search history, removing duplicates and capping at 20.
+  if text.len == 0:
+    return
+  # Remove existing duplicate so the entry is moved to the end.
+  panel.searchHistory.keepItIf(it != text)
+  panel.searchHistory.add(text)
+  if panel.searchHistory.len > 20:
+    panel.searchHistory.delete(0)
+  panel.historyIndex = panel.searchHistory.len
+
+proc formatSearchCounter*(panel: SearchPanel): string =
+  ## Return the counter string currently shown for the active search mode.
+  if panel.errorText.len > 0:
+    result = panel.errorText
+  elif panel.mode == smCurrentFile:
+    result = $(panel.currentMatchIndex + 1) & "/" & $panel.matches.len
+  elif panel.mode == smWorkspace:
+    result = $panel.workspaceMatches.len & " results"
+
+proc buildWorkspaceGroups(panel: var SearchPanel)
+
+proc parseWorkspaceOutput(panel: var SearchPanel; output: string) =
+  ## Parse raw ``path:line:preview`` output into ``workspaceMatches``.
+  if output.len == 0:
+    panel.workspaceMatches.setLen(0)
+    return
+  var count = 0
+  for line in splitLines(output):
+    if line.len < 3: continue
+    let colon2 = line.find(":", 2)
+    if colon2 < 0: continue
+    let relPath = line[0..<colon2]
+    if relPath.len == 0: continue
+    let fullPath = panel.workspaceRoot / relPath
+    let afterColon = line[colon2+1..^1]
+    let colon3 = afterColon.find(":")
+    if colon3 < 0: continue
+    let lineNumStr = afterColon[0..<colon3]
+    var lineNum = 0
+    try:
+      lineNum = parseInt(lineNumStr) - 1
+    except ValueError:
+      continue
+    let preview = afterColon[colon3+1..^1]
+    let searchText = if panel.caseSensitive: panel.findText else: panel.findText.toLowerAscii()
+    let searchTarget = if panel.caseSensitive: preview else: preview.toLowerAscii()
+    let matchStart = searchTarget.find(searchText)
+    let matchLen = if matchStart >= 0: searchText.len else: panel.findText.len
+    panel.workspaceMatches.add(WorkspaceMatch(
+      path: fullPath,
+      line: lineNum,
+      col: if matchStart >= 0: matchStart else: 0,
+      matchLen: matchLen,
+      preview: preview
+    ))
+    inc count
+    if count >= 500:
+      break
 
 proc pollWorkspaceSearch*(panel: var SearchPanel) =
-  if panel.mode == smWorkspace and panel.workspaceSearchInProgress:
-    discard
+  ## Check whether the background workspace search has finished. If so,
+  ## copy the results, build groups, and clear the in-progress flag.
+  if not panel.workspaceSearchInProgress:
+    return
+  let (avail, output) = panel.workspaceSearchChan.tryRecv()
+  if not avail:
+    return
+  joinThread(panel.workspaceSearchThread)
+  withLock(panel.workspaceSearchLock):
+    panel.parseWorkspaceOutput(output)
+    panel.buildWorkspaceGroups()
+    panel.resultScroll = 0
+    panel.workspaceSearchInProgress = false
+    panel.errorText = if panel.workspaceMatches.len > 0: "" else: "No matches"
 
 # Workspace Group Building
 
@@ -206,66 +313,28 @@ proc findAll*(panel: var SearchPanel; ed: ptr SynEdit) =
       panel.workspaceMatches.setLen(0)
       panel.workspaceGroups.setLen(0)
 
-    var excludeExtArg = ""
-    for dir in ExcludedDirs:
-      if excludeExtArg.len > 0:
-        excludeExtArg.add(" ")
-      excludeExtArg.add("--glob !*/" & dir & "/*")
-    for ext in ExcludedExts:
-      if excludeExtArg.len > 0:
-        excludeExtArg.add(" ")
-      excludeExtArg.add("--glob !*" & ext)
+    let args = WorkspaceSearchArgs(
+      findText: panel.findText,
+      workspaceRoot: panel.workspaceRoot,
+      caseSensitive: panel.caseSensitive,
+      useRegex: panel.useRegex,
+      excludedDirs: @ExcludedDirs,
+      excludedExts: @ExcludedExts,
+      chan: addr panel.workspaceSearchChan
+    )
+    createThread(panel.workspaceSearchThread, workspaceSearchThreadProc, args)
 
-    let searchCmd = buildSearchTextCmd(panel.findText, panel.workspaceRoot,
-                                       panel.caseSensitive, panel.useRegex,
-                                       ExcludedDirs, ExcludedExts)
-    var output = ""
-    if searchCmd.len > 0:
-      (output, _) = execCmdEx(searchCmd, workingDir = panel.workspaceRoot)
-    else:
-      output = fallbackSearchText(panel.findText, panel.workspaceRoot,
-                                  panel.caseSensitive, panel.useRegex,
-                                  ExcludedDirs, ExcludedExts)
-
-    withLock(panel.workspaceSearchLock):
-      panel.workspaceSearchInProgress = false
-      if output.len > 0:
-        var count = 0
-        for line in splitLines(output):
-          if line.len < 3: continue
-          let colon2 = line.find(":", 2)
-          if colon2 < 0: continue
-          let relPath = line[0..<colon2]
-          if relPath.len == 0: continue
-          let fullPath = panel.workspaceRoot / relPath
-          let afterColon = line[colon2+1..^1]
-          let colon3 = afterColon.find(":")
-          if colon3 < 0: continue
-          let lineNumStr = afterColon[0..<colon3]
-          var lineNum = 0
-          try:
-            lineNum = parseInt(lineNumStr) - 1
-          except ValueError:
-            continue
-          let preview = afterColon[colon3+1..^1]
-          let searchText = if panel.caseSensitive: panel.findText else: panel.findText.toLowerAscii()
-          let searchTarget = if panel.caseSensitive: preview else: preview.toLowerAscii()
-          let matchStart = searchTarget.find(searchText)
-          let matchLen = if matchStart >= 0: searchText.len else: panel.findText.len
-          panel.workspaceMatches.add(WorkspaceMatch(
-            path: fullPath,
-            line: lineNum,
-            col: if matchStart >= 0: matchStart else: 0,
-            matchLen: matchLen,
-            preview: preview
-          ))
-          inc count
-          if count >= 500:
-            break
-
-      panel.buildWorkspaceGroups()
-      panel.resultScroll = 0
-      panel.errorText = if panel.workspaceMatches.len > 0: "" else: "No matches"
+proc cycleSearchHistory*(panel: var SearchPanel; ed: ptr SynEdit; direction: int) =
+  ## Replace ``findText`` with the previous (direction < 0) or next
+  ## (direction > 0) history entry and rerun the search.
+  if panel.searchHistory.len == 0:
+    return
+  var idx = panel.historyIndex + direction
+  idx = clamp(idx, 0, panel.searchHistory.high)
+  panel.historyIndex = idx
+  panel.findText = panel.searchHistory[idx]
+  panel.findCursor = panel.findText.len
+  panel.findAll(ed)
 
 proc findNext*(panel: var SearchPanel; ed: ptr SynEdit) =
   if panel.mode != smCurrentFile: return
@@ -289,6 +358,21 @@ proc findPrevious*(panel: var SearchPanel; ed: ptr SynEdit) =
 
 # Replace Logic (current file only)
 
+proc replaceAll*(panel: var SearchPanel; ed: ptr SynEdit): int =
+  ## Replace all matches in the current file and return the number of replacements made.
+  if panel.mode != smCurrentFile: return 0
+  if ed == nil or panel.matches.len == 0:
+    return 0
+  result = panel.matches.len
+  # Rebuild text from matches in reverse
+  var text = ed[].fullText()
+  for i in countdown(panel.matches.high, 0):
+    let m = panel.matches[i]
+    text = text[0 ..< m.a] & panel.replaceText & text[(m.b + 1) .. ^1]
+  ed[].setText(text)
+  ed[].markChanged()
+  panel.findAll(ed)
+
 proc replaceCurrent*(panel: var SearchPanel; ed: ptr SynEdit): bool =
   if panel.mode != smCurrentFile: return false
   if ed == nil or panel.currentMatchIndex < 0 or panel.currentMatchIndex >= panel.matches.len:
@@ -307,20 +391,6 @@ proc replaceCurrent*(panel: var SearchPanel; ed: ptr SynEdit): bool =
       ed[].gotoPos(match.a)
       return true
   false
-
-proc replaceAll*(panel: var SearchPanel; ed: ptr SynEdit): bool =
-  if panel.mode != smCurrentFile: return false
-  if ed == nil or panel.matches.len == 0:
-    return false
-  # Rebuild text from matches in reverse
-  var text = ed[].fullText()
-  for i in countdown(panel.matches.high, 0):
-    let m = panel.matches[i]
-    text = text[0 ..< m.a] & panel.replaceText & text[(m.b + 1) .. ^1]
-  ed[].setText(text)
-  ed[].markChanged()
-  panel.findAll(ed)
-  true
 
 # Show / Hide
 
@@ -375,6 +445,16 @@ proc handleInput*(panel: var SearchPanel; ed: ptr SynEdit; e: Event): bool =
     of KeyEsc:
       panel.hide(ed)
       return true
+    of KeyUp:
+      if AltPressed in e.mods and panel.focus == 0:
+        panel.cycleSearchHistory(ed, -1)
+        return true
+      return false
+    of KeyDown:
+      if AltPressed in e.mods and panel.focus == 0:
+        panel.cycleSearchHistory(ed, 1)
+        return true
+      return false
     of KeyV:
       let pasteMod = when defined(macosx): GuiPressed else: CtrlPressed
       if pasteMod in e.mods:
@@ -382,6 +462,7 @@ proc handleInput*(panel: var SearchPanel; ed: ptr SynEdit; e: Event): bool =
         if text.len > 0 and panel.focus >= 0:
           if panel.focus == 0:
             panel.findText.add(text)
+            panel.pushSearchHistory(panel.findText)
             panel.findAll(ed)
           else:
             panel.replaceText.add(text)
@@ -390,6 +471,8 @@ proc handleInput*(panel: var SearchPanel; ed: ptr SynEdit; e: Event): bool =
           return true
       return false
     of KeyEnter:
+      if panel.focus == 0:
+        panel.pushSearchHistory(panel.findText)
       if panel.mode == smCurrentFile:
         if ShiftPressed in e.mods:
           panel.findPrevious(ed)
@@ -464,6 +547,7 @@ proc handleInput*(panel: var SearchPanel; ed: ptr SynEdit; e: Event): bool =
         let cp = panel.findCursor
         panel.findText = panel.findText[0..<cp] & s & panel.findText[cp..^1]
         panel.findCursor = cp + s.len
+        panel.pushSearchHistory(panel.findText)
         panel.findAll(ed)
       else:
         let cp = panel.replaceCursor
@@ -479,7 +563,8 @@ proc handleInput*(panel: var SearchPanel; ed: ptr SynEdit; e: Event): bool =
 
 # Mouse Handling
 
-proc handleMouse*(panel: var SearchPanel; ed: ptr SynEdit; e: Event; bounds: Rect): bool =
+proc handleMouse*(panel: var SearchPanel; ed: ptr SynEdit; e: Event; bounds: Rect;
+                  onNotification: proc(msg: string) = nil): bool =
   if not panel.isVisible:
     return false
 
@@ -548,6 +633,7 @@ proc handleMouse*(panel: var SearchPanel; ed: ptr SynEdit; e: Event; bounds: Rec
     if relX >= refreshX and relX < refreshX + TOGGLE_SIZE:
       panel.hoveredButton = 11
       if e.kind == MouseDownEvent:
+        panel.pushSearchHistory(panel.findText)
         panel.findAll(ed)
       return true
     # Clear results button
@@ -660,6 +746,7 @@ proc handleMouse*(panel: var SearchPanel; ed: ptr SynEdit; e: Event; bounds: Rec
     if relX >= btnX and relX < btnX + TOGGLE_SIZE:
       panel.hoveredButton = 0
       if e.kind == MouseDownEvent:
+        panel.pushSearchHistory(panel.findText)
         if panel.mode == smCurrentFile:
           panel.findPrevious(ed)
         else:
@@ -671,6 +758,7 @@ proc handleMouse*(panel: var SearchPanel; ed: ptr SynEdit; e: Event; bounds: Rec
     if relX >= btnX and relX < btnX + TOGGLE_SIZE:
       panel.hoveredButton = 1
       if e.kind == MouseDownEvent:
+        panel.pushSearchHistory(panel.findText)
         if panel.mode == smCurrentFile:
           panel.findNext(ed)
         else:
@@ -693,7 +781,9 @@ proc handleMouse*(panel: var SearchPanel; ed: ptr SynEdit; e: Event; bounds: Rec
       if relX >= btnX and relX < btnX + repAllBtnW:
         panel.hoveredButton = 3
         if e.kind == MouseDownEvent:
-          discard panel.replaceAll(ed)
+          let count = panel.replaceAll(ed)
+          if count > 0 and onNotification != nil:
+            onNotification("Replaced " & $count & " occurrence" & (if count > 1: "s" else: ""))
         return true
       btnX += repAllBtnW + 4
 
@@ -899,22 +989,17 @@ proc render*(panel: var SearchPanel; ed: ptr SynEdit; bounds: Rect) =
     btnX += 66 + 4
 
   # Match count / error
-  var countText = ""
-  if panel.errorText.len > 0:
-    countText = panel.errorText
-  elif panel.mode == smCurrentFile and panel.matches.len > 0:
-    countText = $(panel.currentMatchIndex + 1) & "/" & $panel.matches.len
-  elif panel.mode == smWorkspace:
-    countText = $panel.workspaceMatches.len & " results"
-
+  let countText = panel.formatSearchCounter()
   if countText.len > 0:
     let countW = measureText(panel.font, countText).w
-    let countX = bounds.x + bounds.w - PADDING - countW
-    if countX > btnX + 8:
-      let countTextH = measureText(panel.font, countText).h
-      let countColor = if panel.errorText.len > 0: errorColor else: textSecondary
-      discard drawText(panel.font, countX, actionY + (ACTION_BTN_H - countTextH) div 2,
-                       countText, countColor, surface)
+    let countX = max(bounds.x + bounds.w - PADDING - countW, btnX + 8)
+    let countTextH = measureText(panel.font, countText).h
+    let countColor = if panel.errorText.len > 0: errorColor else: textSecondary
+    # Erase the area behind the counter so it remains readable over buttons.
+    fillRect(rect(countX - 2, actionY + (ACTION_BTN_H - countTextH) div 2 - 1,
+                  countW + 4, countTextH + 2), surface)
+    discard drawText(panel.font, countX, actionY + (ACTION_BTN_H - countTextH) div 2,
+                     countText, countColor, surface)
 
   y += ACTION_BTN_H + 6
 
@@ -1054,3 +1139,72 @@ proc render*(panel: var SearchPanel; ed: ptr SynEdit; bounds: Rect) =
       fillRect(rect(scrollX + 2, gripY, SCROLLBAR_WIDTH - 4, gripH), textSecondary)
 
     restoreState()
+
+# Bottom results panel renderer
+
+proc renderBottomResults*(panel: var SearchPanel; font: Font; bounds: Rect;
+                          onClick: OnWorkspaceResultClick) =
+  ## Render workspace search results in a wide bottom-panel area with more
+  ## context per match. The supplied ``onClick`` callback is stored on the
+  ## panel for callers that wire up mouse selection later.
+  if onClick != nil:
+    panel.onWorkspaceResultClick = onClick
+
+  let
+    bg = currentTheme.getColor(tcBackground)
+    surface = currentTheme.getColor(tcSurface)
+    borderC = currentTheme.getColor(tcBorder)
+    textC = currentTheme.getColor(tcText)
+    textSecondary = currentTheme.getColor(tcTextSecondary)
+
+  fillRect(bounds, surface)
+  fillRect(rect(bounds.x, bounds.y, bounds.w, 1), borderC)
+
+  var itemY = bounds.y + PADDING
+  saveState()
+  setClipRect(bounds)
+
+  for group in panel.workspaceGroups:
+    if itemY > bounds.y + bounds.h:
+      break
+
+    # File header with more context than the sidebar view.
+    let rel = relativePath(group.path, panel.workspaceRoot)
+    let fileName = extractFilename(group.path)
+    let headerText = if rel.len > 0: rel else: fileName
+    let headerH = max(FILE_GROUP_H, measureText(font, headerText).h + 6)
+    let groupBounds = rect(bounds.x, itemY, bounds.w, headerH)
+    fillRect(groupBounds, bg)
+    drawIcon(iiChevronDown, bounds.x + PADDING, itemY + (headerH - 16) div 2)
+    discard drawText(font, bounds.x + PADDING + 20, itemY + 3, headerText, textC, bg)
+    itemY += headerH
+
+    if itemY > bounds.y + bounds.h:
+      break
+
+    for mi in group.matchIndices:
+      let m = panel.workspaceMatches[mi]
+      let rowBounds = rect(bounds.x, itemY, bounds.w, RESULT_ITEM_HEIGHT)
+      if rowBounds.y >= bounds.y + bounds.h:
+        break
+
+      let rowBg = surface
+      let metaText = "  line " & $(m.line + 1) & ", col " & $(m.col + 1) & "  "
+      let metaW = measureText(font, metaText).w
+      let contentX = bounds.x + PADDING + 20
+
+      discard drawText(font, contentX, itemY + 4, metaText, textSecondary, rowBg)
+
+      let maxPreviewW = bounds.w - PADDING * 2 - 20 - metaW - SCROLLBAR_WIDTH
+      var displayPreview = m.preview
+      displayPreview = truncateTextToWidth(displayPreview, font, maxPreviewW)
+      var hlStart = m.col
+      var hlLen = m.matchLen
+      if hlStart + hlLen > displayPreview.len:
+        hlLen = displayPreview.len - hlStart
+      if hlStart < 0: hlLen = 0
+      drawMatchText(font, contentX + metaW, itemY + 4,
+                    displayPreview, hlStart, hlLen, textC, matchHighlightColor, rowBg)
+      itemY += RESULT_ITEM_HEIGHT
+
+  restoreState()

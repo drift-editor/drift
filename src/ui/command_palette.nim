@@ -12,6 +12,8 @@ const
   SearchHeight = 44
   ItemHeight = 40
   MaxVisibleItems = 8
+  MaxRecentCommands = 20
+  RecentCommandBoost = 25.0
 
 type
   CommandCategory* = enum
@@ -52,6 +54,7 @@ type
     isVisible*: bool
     mode*: PaletteMode
     bounds*: Rect
+    recentIds*: seq[string]  ## Most-recently-used command ids (front = newest)
     onClose*: proc()
     onFileSelect*: proc(path: string)
     beforeShow*: proc()
@@ -69,6 +72,7 @@ proc newCommandPalette*(): CommandPalette =
     hoverIndex: -1,
     isVisible: false,
     mode: pmCommands,
+    recentIds: @[],
     bounds: rect(0, 0, PaletteWidth, PaletteHeight)
   )
 
@@ -182,19 +186,43 @@ proc calculateFuzzyScore(text, query: string): float =
   score -= lastIdx.float32 * 1.5
   return max(1.0, score)
 
+proc recentIndex(palette: CommandPalette, id: string): int =
+  ## Return the position of `id` in recentIds (0 = newest), or -1 if not used recently.
+  for i, rid in palette.recentIds:
+    if rid == id:
+      return i
+  return -1
+
+proc recordCommandUse*(palette: CommandPalette, id: string) =
+  ## Track a command as recently used, keeping the MRU list capped.
+  var next = @[id]
+  for rid in palette.recentIds:
+    if rid != id:
+      next.add(rid)
+  if next.len > MaxRecentCommands:
+    next.setLen(MaxRecentCommands)
+  palette.recentIds = next
+
 proc filterCommands*(palette: CommandPalette) =
-  if palette.searchText.len == 0:
-    palette.filteredCommands = palette.commands
-  else:
-    var scored: seq[tuple[cmd: Command, score: float]] = @[]
-    for cmd in palette.commands:
+  var scored: seq[tuple[cmd: Command, score: float, originalIndex: int]] = @[]
+  for i, cmd in palette.commands:
+    var score = 0.0
+    if palette.searchText.len > 0:
       let nameScore = calculateFuzzyScore(cmd.name, palette.searchText)
       let descScore = calculateFuzzyScore(cmd.description, palette.searchText)
-      let score = max(nameScore, descScore * 0.3)
-      if score > 0:
-        scored.add((cmd, score))
-    scored.sort((a, b) => cmp(b.score, a.score))
-    palette.filteredCommands = scored.mapIt(it.cmd)
+      score = max(nameScore, descScore * 0.3)
+    let rIdx = recentIndex(palette, cmd.id)
+    if rIdx >= 0:
+      # Recent commands get a boost; bigger boost for more recently used.
+      score += (MaxRecentCommands - rIdx).float * RecentCommandBoost
+    if score > 0 or palette.searchText.len == 0:
+      scored.add((cmd, score, i))
+  # Sort by score descending, then preserve original registration order for ties.
+  scored.sort(proc(a, b: tuple[cmd: Command, score: float, originalIndex: int]): int =
+    let scoreCmp = cmp(b.score, a.score)
+    if scoreCmp != 0: return scoreCmp
+    cmp(a.originalIndex, b.originalIndex))
+  palette.filteredCommands = scored.mapIt(it.cmd)
   if palette.selectedIndex >= palette.filteredCommands.len:
     palette.selectedIndex = max(0, palette.filteredCommands.len - 1)
 
@@ -262,6 +290,7 @@ proc handleInput*(palette: CommandPalette, e: Event): bool =
           let cmd = palette.filteredCommands[palette.selectedIndex]
           if cmd.action != nil:
             cmd.action()
+          palette.recordCommandUse(cmd.id)
           palette.hide()
       of pmFiles:
         if palette.selectedIndex < palette.filteredFiles.len:
@@ -313,6 +342,7 @@ proc handleInput*(palette: CommandPalette, e: Event): bool =
           let cmd = palette.filteredCommands[index]
           if cmd.action != nil:
             cmd.action()
+          palette.recordCommandUse(cmd.id)
           palette.hide()
       of pmFiles:
         if index >= 0 and index < palette.filteredFiles.len:
