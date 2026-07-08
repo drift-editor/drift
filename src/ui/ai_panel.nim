@@ -112,6 +112,16 @@ type
     planMode*: bool
     userScrolledUp*: bool
     rightClickedMessageIndex*: int
+    # Cached bubble layouts to avoid recomputing every frame
+    cachedBubbles: seq[BubbleLayout]
+    cachedBoundsW: int
+    cachedContentHeight: int
+    cachedLineHeight: int
+    cachedBgColor: Color
+    cachedBubblesValid: bool
+
+proc invalidateBubbleCache*(panel: AIPanel) {.inline.} =
+  panel.cachedBubblesValid = false
 
 proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
   AIPanel(
@@ -145,7 +155,13 @@ proc newAIPanel*(placeholder: string = "Ask AI..."): AIPanel =
     showVariants: false,
     reasoningEffort: "high",
     userScrolledUp: false,
-    rightClickedMessageIndex: -1
+    rightClickedMessageIndex: -1,
+    cachedBubbles: @[],
+    cachedBoundsW: 0,
+    cachedContentHeight: 0,
+    cachedLineHeight: 0,
+    cachedBgColor: color(0, 0, 0, 0),
+    cachedBubblesValid: false
   )
 
 proc sendCurrentMessage*(panel: AIPanel) =
@@ -166,6 +182,7 @@ proc sendCurrentMessage*(panel: AIPanel) =
   # If they scrolled up to read history, keep their position.
   if not panel.userScrolledUp:
     panel.scrollOffset = high(int)  ## Will be clamped to bottom during render
+  panel.invalidateBubbleCache()
   if panel.onSend != nil:
     panel.onSend(text)
 
@@ -187,8 +204,10 @@ proc appendText*(panel: AIPanel, chunk: string) =
   else:
     panel.messages[^1].content &= chunk
     panel.messages[^1].segments = markdownToSegments(panel.messages[^1].content)
+  panel.invalidateBubbleCache()
   if not panel.userScrolledUp:
     panel.scrollOffset = high(int)  ## Will be clamped to bottom during render
+    panel.invalidateBubbleCache()
 
 proc appendThinking*(panel: AIPanel, chunk: string) =
   ## Append a thinking/reasoning chunk to the current (or a new) assistant
@@ -199,6 +218,7 @@ proc appendThinking*(panel: AIPanel, chunk: string) =
     panel.messages.add(ChatMessage(role: "assistant", content: "", thinking: chunk))
   else:
     panel.messages[^1].thinking &= chunk
+  panel.invalidateBubbleCache()
   if not panel.userScrolledUp:
     panel.scrollOffset = high(int)  ## Will be clamped to bottom during render
 
@@ -788,6 +808,13 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
   let maxW = bounds.w - MessagePadding * 4
   let fm = font.getFontMetrics()
   let textC = currentTheme.getColor(tcText)
+  let bgColorAssistant = currentTheme.getColor(tcBackground)
+  # Reuse cached layouts if messages, bounds, font, or theme haven't changed.
+  if panel.cachedBubblesValid and
+     panel.cachedBoundsW == bounds.w and
+     panel.cachedLineHeight == fm.lineHeight and
+     panel.cachedBgColor == bgColorAssistant:
+    return panel.cachedBubbles
   var y = MessagePadding
   for i, msg in panel.messages:
     let isUser = msg.role == "user"
@@ -856,6 +883,14 @@ proc computeBubbleLayouts(panel: AIPanel, font: Font, bounds: Rect): seq[BubbleL
       messageIndex: i
     ))
     y += bubbleH + MessageGap
+
+  # Update cache
+  panel.cachedBubbles = result
+  panel.cachedBoundsW = bounds.w
+  panel.cachedLineHeight = fm.lineHeight
+  panel.cachedBgColor = bgColorAssistant
+  panel.cachedContentHeight = if result.len > 0: result[^1].y + result[^1].h + MessageGap else: MessagePadding
+  panel.cachedBubblesValid = true
 
 proc messageIndexAt*(panel: AIPanel, y: int, font: Font, bounds: Rect): int =
   ## Return the message index at the given screen Y, or -1.
@@ -930,9 +965,7 @@ proc render*(panel: AIPanel, font: Font, bounds: Rect) =
   let bubbles = computeBubbleLayouts(panel, font, bounds)
 
   # Compute total content height
-  var contentHeight = MessagePadding
-  if bubbles.len > 0:
-    contentHeight = bubbles[^1].y + bubbles[^1].h + MessageGap
+  var contentHeight = panel.cachedContentHeight
   if panel.isStreaming:
     contentHeight += fm.lineHeight
 
