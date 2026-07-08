@@ -71,4 +71,44 @@ assertEq(frames[1].line, 9, "frame 1 line (0-based)")
 assertEq(parseStackFrames(nil).len, 0, "nil json")
 assertEq(parseStackFrames(newJObject()).len, 0, "empty object")
 
+# Scope parsing
+let scopesJson = %*{
+  "body": {
+    "scopes": [
+      {"name": "Locals", "variablesReference": 1000, "expensive": false},
+      {"name": "Globals", "variablesReference": 1001, "expensive": true}
+    ]
+  }
+}
+let scopes = parseScopes(scopesJson)
+assertEq(scopes.len, 2, "scope count")
+assertEq(scopes[0].name, "Locals", "scope 0 name")
+assertEq(scopes[0].variablesReference, 1000, "scope 0 ref")
+assertEq(scopes[0].expensive, false, "scope 0 expensive")
+assertEq(scopes[1].name, "Globals", "scope 1 name")
+assertEq(scopes[1].expensive, true, "scope 1 expensive")
+assertEq(parseScopes(nil).len, 0, "nil scopes")
+assertEq(parseScopes(newJObject()).len, 0, "empty scopes")
+
+# Variable parsing
+let varsJson = %*{
+  "body": {
+    "variables": [
+      {"name": "x", "value": "42", "type": "int", "variablesReference": 0},
+      {"name": "obj", "value": "MyObj", "type": "MyObj", "variablesReference": 2000, "namedVariables": 2, "indexedVariables": 0}
+    ]
+  }
+}
+let vars = parseVariables(varsJson)
+assertEq(vars.len, 2, "var count")
+assertEq(vars[0].name, "x", "var 0 name")
+assertEq(vars[0].value, "42", "var 0 value")
+assertEq(vars[0].typeName, "int", "var 0 type")
+assertEq(vars[0].variablesReference, 0, "var 0 ref")
+assertEq(vars[1].name, "obj", "var 1 name")
+assertEq(vars[1].variablesReference, 2000, "var 1 ref")
+assertEq(vars[1].namedVariables, 2, "var 1 named")
+assertEq(parseVariables(nil).len, 0, "nil vars")
+assertEq(parseVariables(newJObject()).len, 0, "empty vars")
+
 echo "All debug state tests passed!"

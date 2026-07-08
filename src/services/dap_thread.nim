@@ -27,6 +27,7 @@ type
     dmkOutput
     dmkTerminated
     dmkStackTraceResponse
+    dmkScopesResponse
     dmkVariablesResponse
 
   DAPMessage* = object
@@ -92,8 +93,10 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
         return
 
       var stackTraceFuture: Future[JsonNode] = nil
+      var scopesFuture: Future[JsonNode] = nil
       var variablesFuture: Future[JsonNode] = nil
       var stackTraceRequestMeta: Option[DAPMessage] = none(DAPMessage)
+      var scopesRequestMeta: Option[DAPMessage] = none(DAPMessage)
       var variablesRequestMeta: Option[DAPMessage] = none(DAPMessage)
       var idleCount = 0
       const FastSleepMs = 1
@@ -117,6 +120,7 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
           var lastSetBreakpoints: Option[DAPMessage] = none(DAPMessage)
           var lastConfigDone: Option[DAPMessage] = none(DAPMessage)
           var lastStackTrace: Option[DAPMessage] = none(DAPMessage)
+          var lastScopes: Option[DAPMessage] = none(DAPMessage)
           var lastVariables: Option[DAPMessage] = none(DAPMessage)
           var lastContinue: Option[DAPMessage] = none(DAPMessage)
           var lastNext: Option[DAPMessage] = none(DAPMessage)
@@ -132,6 +136,7 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
             of dmkSetBreakpoints: lastSetBreakpoints = some(m)
             of dmkConfigurationDone: lastConfigDone = some(m)
             of dmkStackTrace: lastStackTrace = some(m)
+            of dmkScopes: lastScopes = some(m)
             of dmkVariables: lastVariables = some(m)
             of dmkContinue: lastContinue = some(m)
             of dmkNext: lastNext = some(m)
@@ -160,6 +165,10 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
             let s = lastStackTrace.get()
             stackTraceFuture = requestStackTrace(client, s.int1)
             stackTraceRequestMeta = some(s)
+          if running and lastScopes.isSome:
+            let s = lastScopes.get()
+            scopesFuture = requestScopes(client, s.int1)
+            scopesRequestMeta = some(s)
           if running and lastVariables.isSome:
             let v = lastVariables.get()
             variablesFuture = requestVariables(client, v.int1)
@@ -197,6 +206,18 @@ proc dapThreadProc(t: DAPThread) {.thread.} =
           ))
           stackTraceFuture = nil
           stackTraceRequestMeta = none(DAPMessage)
+
+        if scopesFuture != nil and scopesFuture.finished:
+          hadFlushWork = true
+          let resp = scopesFuture.read()
+          let reqMeta = if scopesRequestMeta.isSome: scopesRequestMeta.get() else: DAPMessage(kind: dmkScopes)
+          t.sendResponse(DAPMessage(
+            kind: dmkScopesResponse,
+            int1: reqMeta.int1,
+            jsonData: resp
+          ))
+          scopesFuture = nil
+          scopesRequestMeta = none(DAPMessage)
 
         if variablesFuture != nil and variablesFuture.finished:
           hadFlushWork = true
@@ -265,6 +286,9 @@ proc requestConfigurationDone*(t: DAPThread) =
 
 proc requestStackTrace*(t: DAPThread; threadId: int) =
   t.queueRequest(DAPMessage(kind: dmkStackTrace, int1: threadId))
+
+proc requestScopes*(t: DAPThread; frameId: int) =
+  t.queueRequest(DAPMessage(kind: dmkScopes, int1: frameId))
 
 proc requestVariables*(t: DAPThread; variablesReference: int) =
   t.queueRequest(DAPMessage(kind: dmkVariables, int1: variablesReference))

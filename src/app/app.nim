@@ -169,6 +169,7 @@ type
     lastCursor: CursorKind
     lastStatusText: string
     lastCurrentLine, lastCurrentCol: int
+    lastKeybindingsMtime: float
 
 const
   TerminalHeight = 200
@@ -1768,6 +1769,9 @@ proc init*(app: App) =
     let idx = app.openBuffer(path)
     if idx >= 0 and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
       app.buffers[app.currentBuffer].ed.gotoLine(line, col)
+  app.debugPanel.onVariablesRequest = proc(variablesReference: int) =
+    if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
+      app.dapThread.requestVariables(variablesReference)
 
   # Debug sidebar
   app.debugSidebar = newDebugSidebar()
@@ -2369,6 +2373,30 @@ proc showSymbolPicker*(app: App, path: string, symbols: seq[LSPSymbol]) =
     items.add(LocationItem(display: s.name, loc: loc))
   app.locationPicker.show(items, app.mouseX, app.mouseY)
 
+
+proc reloadKeybindingsIfChanged(app: App) =
+  ## Hot-reload keybindings.toml when its mtime changes.
+  let path = kb.keybindingsPath()
+  if not fileExists(path):
+    return
+  let mtime = getFileInfo(path).lastWriteTime.toUnixFloat()
+  if app.lastKeybindingsMtime <= 0:
+    app.lastKeybindingsMtime = mtime
+    return
+  if abs(mtime - app.lastKeybindingsMtime) < 0.5:
+    return
+  app.lastKeybindingsMtime = mtime
+  let overrides = kb.loadKeybindings(path)
+  var applied = 0
+  for cmdId, binding in overrides.pairs:
+    if app.commands.hasCommand(cmdId):
+      app.commands.bindKey(binding.mods, binding.key, cmdId)
+      inc applied
+    else:
+      stderr.writeLine("[keybindings] unknown command id: " & cmdId)
+  if applied > 0:
+    stderr.writeLine("[keybindings] hot-reloaded " & $applied & " override(s)")
+
 proc run*(app: App) =
   # Command system init (done here so template can see all app procs)
   initCommands(app)
@@ -2913,6 +2941,9 @@ proc run*(app: App) =
     # Auto-save dirty buffers after delay
     app.checkAutoSave()
 
+    # Hot-reload keybindings periodically
+    app.reloadKeybindingsIfChanged()
+
     # Poll LSP responses
     if app.lspThread != nil:
       var responses: seq[LSPMessage] = @[]
@@ -3076,6 +3107,7 @@ proc run*(app: App) =
         app.debugState = dssStopped
         app.debugStopThreadId = resp.int1
         stderr.writeLine("[app] DAP stopped: reason=" & resp.str1 & " threadId=" & $resp.int1)
+        app.debugPanel.clearVariables()
         if app.dapThread != nil and app.dapThread.isReady.load(moAcquire) and resp.int1 > 0:
           app.dapThread.requestStackTrace(resp.int1)
         # Try to navigate to stop location if description contains path:line
@@ -3102,8 +3134,22 @@ proc run*(app: App) =
           let idx = app.openBuffer(frames[0].source)
           if idx >= 0 and app.currentBuffer >= 0 and app.currentBuffer < app.buffers.len:
             app.buffers[app.currentBuffer].ed.gotoLine(frames[0].line, frames[0].column)
+        # Request scopes for the top stack frame so variables can be shown
+        if frames.len > 0 and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
+          app.dapThread.requestScopes(frames[0].id)
+      of dmkScopesResponse:
+        let scopes = parseScopes(resp.jsonData)
+        app.debugPanel.clearVariables()
+        app.debugPanel.addScopes(scopes)
+        # Automatically expand scopes and request their variables
+        for scopeNode in app.debugPanel.varNodes:
+          scopeNode.expanded = true
+          if scopeNode.variablesReference > 0 and app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
+            scopeNode.loading = true
+            app.dapThread.requestVariables(scopeNode.variablesReference)
       of dmkVariablesResponse:
-        discard  # TODO: show variables in debug panel
+        let variables = parseVariables(resp.jsonData)
+        app.debugPanel.addVariables(resp.int1, variables)
       else:
         discard
       # Sync debug panel state to sidebar

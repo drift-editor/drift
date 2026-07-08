@@ -24,6 +24,19 @@ type
     line*: int
     enabled*: bool
 
+  Scope* = object
+    name*: string
+    variablesReference*: int
+    expensive*: bool
+
+  DebugVariable* = object
+    name*: string
+    value*: string
+    typeName*: string
+    variablesReference*: int
+    namedVariables*: int
+    indexedVariables*: int
+
 proc toDAPLine*(line: int): int =
   ## Convert Drift's 0-based line numbers to DAP's 1-based line numbers.
   line + 1
@@ -76,3 +89,37 @@ proc parseStackFrames*(jsonData: JsonNode): seq[StackFrame] =
     if item.hasKey("column"):
       column = fromDAPLine(item["column"].getInt())
     result.add(StackFrame(id: id, name: name, source: source, line: line, column: column))
+
+proc parseScopes*(jsonData: JsonNode): seq[Scope] =
+  ## Parse a DAP `scopes` response body into shared Scope objects.
+  result = @[]
+  if jsonData == nil or not jsonData.hasKey("body"): return
+  let body = jsonData["body"]
+  if not body.hasKey("scopes"): return
+  for item in body["scopes"]:
+    let name = if item.hasKey("name"): item["name"].getStr() else: ""
+    let variablesReference = if item.hasKey("variablesReference"): item["variablesReference"].getInt() else: 0
+    let expensive = if item.hasKey("expensive"): item["expensive"].getBool() else: false
+    result.add(Scope(name: name, variablesReference: variablesReference, expensive: expensive))
+
+proc parseVariables*(jsonData: JsonNode): seq[DebugVariable] =
+  ## Parse a DAP `variables` response body into shared DebugVariable objects.
+  result = @[]
+  if jsonData == nil or not jsonData.hasKey("body"): return
+  let body = jsonData["body"]
+  if not body.hasKey("variables"): return
+  for item in body["variables"]:
+    let name = if item.hasKey("name"): item["name"].getStr() else: ""
+    let value = if item.hasKey("value"): item["value"].getStr() else: ""
+    let typeName = if item.hasKey("type"): item["type"].getStr() else: ""
+    let variablesReference = if item.hasKey("variablesReference"): item["variablesReference"].getInt() else: 0
+    let namedVariables = if item.hasKey("namedVariables"): item["namedVariables"].getInt() else: 0
+    let indexedVariables = if item.hasKey("indexedVariables"): item["indexedVariables"].getInt() else: 0
+    result.add(DebugVariable(
+      name: name,
+      value: value,
+      typeName: typeName,
+      variablesReference: variablesReference,
+      namedVariables: namedVariables,
+      indexedVariables: indexedVariables
+    ))
