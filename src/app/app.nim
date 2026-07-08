@@ -489,6 +489,158 @@ proc promptBaseUrl(app: App) =
       saveAppConfig(app)
   app.inputDialog.show()
 
+proc buildSettingsItems*(app: App): seq[SettingItem] =
+  ## Build the searchable list of editable settings shown by the settings picker.
+  result.add(SettingItem(
+    key: "editor.tabSize",
+    label: "Tab Size",
+    description: "Number of spaces per indentation level",
+    kind: skInt,
+    getValue: proc(): string = $app.config.tabSize,
+    setValue: proc(value: string) =
+      try:
+        let n = parseInt(value)
+        if n >= 1 and n <= 8:
+          app.config.tabSize = n
+          for i in 0 ..< app.buffers.len:
+            if not app.buffers[i].isImage:
+              app.buffers[i].ed.tabSize = n
+          saveAppConfig(app)
+          discard app.notificationManager.info("Tab size: " & $n)
+      except ValueError:
+        discard
+  ))
+  result.add(SettingItem(
+    key: "editor.showLineNumbers",
+    label: "Show Line Numbers",
+    description: "Display line numbers in the editor gutter",
+    kind: skBool,
+    getValue: proc(): string = $app.config.showLineNumbers,
+    setValue: proc(value: string) =
+      try:
+        app.config.showLineNumbers = parseBool(value)
+        for i in 0 ..< app.buffers.len:
+          if not app.buffers[i].isImage:
+            app.buffers[i].ed.showLineNumbers = app.config.showLineNumbers
+        saveAppConfig(app)
+      except ValueError:
+        discard
+  ))
+  result.add(SettingItem(
+    key: "editor.autoIndent",
+    label: "Auto Indent",
+    description: "Smart indent on Enter",
+    kind: skBool,
+    getValue: proc(): string = $app.config.autoIndent,
+    setValue: proc(value: string) =
+      try:
+        app.config.autoIndent = parseBool(value)
+        saveAppConfig(app)
+      except ValueError:
+        discard
+  ))
+  result.add(SettingItem(
+    key: "editor.autoCloseBrackets",
+    label: "Auto Close Brackets",
+    description: "Auto-insert closing brackets and quotes",
+    kind: skBool,
+    getValue: proc(): string = $app.config.autoCloseBrackets,
+    setValue: proc(value: string) =
+      try:
+        app.config.autoCloseBrackets = parseBool(value)
+        saveAppConfig(app)
+      except ValueError:
+        discard
+  ))
+  result.add(SettingItem(
+    key: "editor.bracketHighlight",
+    label: "Bracket Highlight",
+    description: "Highlight matching bracket pairs",
+    kind: skBool,
+    getValue: proc(): string = $app.config.bracketHighlight,
+    setValue: proc(value: string) =
+      try:
+        app.config.bracketHighlight = parseBool(value)
+        for i in 0 ..< app.buffers.len:
+          if not app.buffers[i].isImage:
+            app.buffers[i].ed.theme = app.editorTheme()
+        saveAppConfig(app)
+      except ValueError:
+        discard
+  ))
+  result.add(SettingItem(
+    key: "workbench.theme",
+    label: "Color Theme",
+    description: "Current color theme (use Color Theme command to change)",
+    kind: skSpecial,
+    getValue: proc(): string = app.config.themeName,
+    setValue: proc(value: string) = discard
+  ))
+  result.add(SettingItem(
+    key: "search.caseSensitive",
+    label: "Search Case Sensitive",
+    description: "Default case-sensitive search",
+    kind: skBool,
+    getValue: proc(): string = $app.config.searchCaseSensitive,
+    setValue: proc(value: string) =
+      try:
+        app.config.searchCaseSensitive = parseBool(value)
+        saveAppConfig(app)
+      except ValueError:
+        discard
+  ))
+  result.add(SettingItem(
+    key: "search.useRegex",
+    label: "Search Use Regex",
+    description: "Default regex search",
+    kind: skBool,
+    getValue: proc(): string = $app.config.searchUseRegex,
+    setValue: proc(value: string) =
+      try:
+        app.config.searchUseRegex = parseBool(value)
+        saveAppConfig(app)
+      except ValueError:
+        discard
+  ))
+  result.add(SettingItem(
+    key: "search.wholeWord",
+    label: "Search Whole Word",
+    description: "Default whole-word search",
+    kind: skBool,
+    getValue: proc(): string = $app.config.searchWholeWord,
+    setValue: proc(value: string) =
+      try:
+        app.config.searchWholeWord = parseBool(value)
+        saveAppConfig(app)
+      except ValueError:
+        discard
+  ))
+  result.add(SettingItem(
+    key: "files.autoSave",
+    label: "Auto Save",
+    description: "off / afterDelay",
+    kind: skString,
+    getValue: proc(): string = app.config.autoSave,
+    setValue: proc(value: string) =
+      app.config.autoSave = value
+      saveAppConfig(app)
+  ))
+  result.add(SettingItem(
+    key: "files.autoSaveDelayMs",
+    label: "Auto Save Delay",
+    description: "Milliseconds before auto-saving",
+    kind: skInt,
+    getValue: proc(): string = $app.config.autoSaveDelayMs,
+    setValue: proc(value: string) =
+      try:
+        let n = parseInt(value)
+        if n >= 100:
+          app.config.autoSaveDelayMs = n
+          saveAppConfig(app)
+      except ValueError:
+        discard
+  ))
+
 proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
   var app = App(config: config, initialAiAgent: config.aiAgent, focus: "editor", screen: asWelcome, currentBuffer: -1, sidebarVisible: true, showGitPanel: false, showSearchPanel: false, showDebugPanel: false, terminalHeight: TerminalHeight, sidebarWidth: SidebarWidth, aiPanelVisible: false, aiPanelWidth: RightPanelWidth, hoverPendingPos: -1, hoverPendingTick: high(int), hoverRequestPos: -1, hoverRequestId: -1, aiPanel: newAIPanel("Ask " & agentLabel(config.aiAgent) & "..."), debugState: dssOff, debugStopThreadId: 0, breakpoints: @[], closedTabs: @[], clipboardHistory: @[], clipboardHistoryIndex: 0, externalChangeSuppressed: initHashSet[string](), externalChangePending: initHashSet[string]())
   app.aiPanel.subtitle = aiSubtitle(config)
@@ -1957,6 +2109,11 @@ proc init*(app: App) =
 
   # Command palette
   app.commandPalette.clearCommands()
+  app.commandPalette.registerCommand("workbench.openSettings", "Open Settings", "Search and edit user settings", ccView, "Ctrl+,",
+    proc() =
+      app.commandPalette.switchToSettingsMode(app.buildSettingsItems())
+      app.commandPalette.show()
+      if app.tooltip.visible: app.tooltip.hideTooltip())
   app.commandPalette.registerCommand("file.new", "New File", "Create a new file", ccFile, "Ctrl+N",
     proc() = app.newFile())
   app.commandPalette.registerCommand("file.open", "Open File", "Open an existing file", ccFile, "Ctrl+O",
@@ -2163,6 +2320,31 @@ proc init*(app: App) =
     proc() =
       app.commandPalette.switchToCommandMode()
       app.commandPalette.show())
+
+  # Settings picker: open input dialog for numeric/string settings
+  app.commandPalette.onSettingSelect = proc(item: SettingItem) =
+    case item.kind
+    of skInt:
+      app.inputDialog.title = item.label
+      app.inputDialog.prompt = "Enter new value for " & item.key & ":"
+      app.inputDialog.text = item.getValue()
+      app.inputDialog.centerOnScreen(app.width, app.height)
+      app.inputDialog.onResult = proc(confirmed: bool, text: string) =
+        if confirmed and item.setValue != nil:
+          item.setValue(text)
+      app.inputDialog.show()
+    of skString:
+      app.inputDialog.title = item.label
+      app.inputDialog.prompt = "Enter new value for " & item.key & ":"
+      app.inputDialog.text = item.getValue()
+      app.inputDialog.centerOnScreen(app.width, app.height)
+      app.inputDialog.onResult = proc(confirmed: bool, text: string) =
+        if confirmed and item.setValue != nil:
+          item.setValue(text)
+      app.inputDialog.show()
+    else:
+      discard
+
   # Theme selector
   app.themeSelector.onPreview = proc(name: string) =
     app.setTheme(name)

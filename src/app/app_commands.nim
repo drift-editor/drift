@@ -103,6 +103,12 @@ template initCommands*(app: untyped): untyped =
       app.commandPalette.show()
       if app.tooltip.visible: app.tooltip.hideTooltip()
 
+    app.commands.bindKey({CtrlPressed}, KeyComma, "workbench.openSettings")
+    app.commands.register("workbench.openSettings") do ():
+      app.commandPalette.switchToSettingsMode(app.buildSettingsItems())
+      app.commandPalette.show()
+      if app.tooltip.visible: app.tooltip.hideTooltip()
+
     app.commands.bindKey({CtrlPressed}, KeyP, "workbench.quickOpen")
     app.commands.register("workbench.quickOpen") do ():
       app.commandPalette.switchToFileMode(app.buildQuickOpenFiles())

@@ -48,6 +48,20 @@ type
     searchRememberOptions*: bool
     searchHistory*: seq[string]
 
+  SettingKind* = enum
+    skBool
+    skInt
+    skString
+    skSpecial
+
+  SettingItem* = object
+    key*: string
+    label*: string
+    description*: string
+    kind*: SettingKind
+    getValue*: proc(): string {.closure.}
+    setValue*: proc(value: string) {.closure.}
+
 proc configDir*(): string =
   getConfigDir() / "drift"
 

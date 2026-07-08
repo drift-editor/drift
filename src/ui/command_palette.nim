@@ -5,6 +5,7 @@ import std/[algorithm, sequtils, strutils, sugar]
 import uirelays
 import uirelays/[coords, screen, input]
 import theme, icons
+import ../core/config
 
 const
   PaletteWidth = 600
@@ -38,6 +39,7 @@ type
   PaletteMode* = enum
     pmCommands
     pmFiles
+    pmSettings
 
   FileItem* = object
     name*: string
@@ -48,6 +50,8 @@ type
     filteredCommands*: seq[Command]
     fileItems*: seq[FileItem]
     filteredFiles*: seq[FileItem]
+    settingsItems*: seq[SettingItem]
+    filteredSettings*: seq[SettingItem]
     searchText*: string
     selectedIndex*: int
     hoverIndex*: int
@@ -57,6 +61,7 @@ type
     recentIds*: seq[string]  ## Most-recently-used command ids (front = newest)
     onClose*: proc()
     onFileSelect*: proc(path: string)
+    onSettingSelect*: proc(item: SettingItem)
     beforeShow*: proc()
 
 # Initialization
@@ -67,6 +72,8 @@ proc newCommandPalette*(): CommandPalette =
     filteredCommands: @[],
     fileItems: @[],
     filteredFiles: @[],
+    settingsItems: @[],
+    filteredSettings: @[],
     searchText: "",
     selectedIndex: 0,
     hoverIndex: -1,
@@ -142,6 +149,7 @@ proc registerDefaults*(palette: CommandPalette) =
 
 proc filterCommands*(palette: CommandPalette)
 proc filterFiles*(palette: CommandPalette)
+proc filterSettings*(palette: CommandPalette)
 
 proc switchToCommandMode*(palette: CommandPalette) =
   palette.mode = pmCommands
@@ -155,6 +163,13 @@ proc switchToFileMode*(palette: CommandPalette, items: seq[FileItem]) =
   palette.searchText = ""
   palette.selectedIndex = 0
   palette.filterFiles()
+
+proc switchToSettingsMode*(palette: CommandPalette, items: seq[SettingItem]) =
+  palette.mode = pmSettings
+  palette.settingsItems = items
+  palette.searchText = ""
+  palette.selectedIndex = 0
+  palette.filterSettings()
 
 # Filtering
 
@@ -243,10 +258,28 @@ proc filterFiles*(palette: CommandPalette) =
   if palette.selectedIndex >= palette.filteredFiles.len:
     palette.selectedIndex = max(0, palette.filteredFiles.len - 1)
 
+proc filterSettings*(palette: CommandPalette) =
+  if palette.searchText.len == 0:
+    palette.filteredSettings = palette.settingsItems
+  else:
+    var scored: seq[tuple[item: SettingItem, score: float]] = @[]
+    for si in palette.settingsItems:
+      let labelScore = calculateFuzzyScore(si.label, palette.searchText)
+      let keyScore = calculateFuzzyScore(si.key, palette.searchText)
+      let descScore = calculateFuzzyScore(si.description, palette.searchText)
+      let score = max(max(labelScore, keyScore * 0.8), descScore * 0.3)
+      if score > 0:
+        scored.add((si, score))
+    scored.sort((a, b) => cmp(b.score, a.score))
+    palette.filteredSettings = scored.mapIt(it.item)
+  if palette.selectedIndex >= palette.filteredSettings.len:
+    palette.selectedIndex = max(0, palette.filteredSettings.len - 1)
+
 proc filterCurrent*(palette: CommandPalette) =
   case palette.mode
   of pmCommands: palette.filterCommands()
   of pmFiles: palette.filterFiles()
+  of pmSettings: palette.filterSettings()
 
 # Visibility Control
 
@@ -298,6 +331,14 @@ proc handleInput*(palette: CommandPalette, e: Event): bool =
           if palette.onFileSelect != nil:
             palette.onFileSelect(fi.path)
           palette.hide()
+      of pmSettings:
+        if palette.selectedIndex < palette.filteredSettings.len:
+          let item = palette.filteredSettings[palette.selectedIndex]
+          if item.kind == skBool and item.setValue != nil:
+            let current = parseBool(item.getValue())
+            item.setValue($not current)
+          elif palette.onSettingSelect != nil:
+            palette.onSettingSelect(item)
       return true
     of KeyUp:
       if palette.selectedIndex > 0:
@@ -307,6 +348,7 @@ proc handleInput*(palette: CommandPalette, e: Event): bool =
       let maxIdx = case palette.mode
         of pmCommands: palette.filteredCommands.len - 1
         of pmFiles: palette.filteredFiles.len - 1
+        of pmSettings: palette.filteredSettings.len - 1
       if palette.selectedIndex < maxIdx:
         palette.selectedIndex += 1
       return true
@@ -351,6 +393,15 @@ proc handleInput*(palette: CommandPalette, e: Event): bool =
           if palette.onFileSelect != nil:
             palette.onFileSelect(fi.path)
           palette.hide()
+      of pmSettings:
+        if index >= 0 and index < palette.filteredSettings.len:
+          palette.selectedIndex = index
+          let item = palette.filteredSettings[index]
+          if item.kind == skBool and item.setValue != nil:
+            let current = parseBool(item.getValue())
+            item.setValue($not current)
+          elif palette.onSettingSelect != nil:
+            palette.onSettingSelect(item)
     return true
   of MouseWheelEvent:
     let mousePos = point(e.x, e.y)
@@ -359,6 +410,7 @@ proc handleInput*(palette: CommandPalette, e: Event): bool =
       let maxIdx = case palette.mode
         of pmCommands: max(0, palette.filteredCommands.len - 1)
         of pmFiles: max(0, palette.filteredFiles.len - 1)
+        of pmSettings: max(0, palette.filteredSettings.len - 1)
       if maxIdx >= 0:
         palette.selectedIndex = clamp(palette.selectedIndex - delta, 0, maxIdx)
     return true
@@ -381,6 +433,12 @@ proc handleInput*(palette: CommandPalette, e: Event): bool =
           palette.hoverIndex = -1
       of pmFiles:
         if index >= 0 and index < palette.filteredFiles.len:
+          palette.selectedIndex = index
+          palette.hoverIndex = index
+        else:
+          palette.hoverIndex = -1
+      of pmSettings:
+        if index >= 0 and index < palette.filteredSettings.len:
           palette.selectedIndex = index
           palette.hoverIndex = index
         else:
@@ -429,6 +487,7 @@ proc render*(palette: CommandPalette, font: Font, viewport: Rect) =
   let searchDisplay = case palette.mode
     of pmCommands: (if palette.searchText.len > 0: palette.searchText else: "Type to search commands...")
     of pmFiles: (if palette.searchText.len > 0: palette.searchText else: "Type to search files...")
+    of pmSettings: (if palette.searchText.len > 0: palette.searchText else: "Type to search settings...")
   let searchColor = if palette.searchText.len > 0: text else: textSecondary
   discard drawText(font, searchBounds.x + 12, searchBounds.y + 12, searchDisplay, searchColor, bg)
 
@@ -470,3 +529,21 @@ proc render*(palette: CommandPalette, font: Font, viewport: Rect) =
 
     if palette.filteredFiles.len == 0:
       discard drawText(font, palette.bounds.x + 20, listY + 12, "No files found", textSecondary, color(0, 0, 0, 0))
+
+  of pmSettings:
+    let maxItems = min(MaxVisibleItems, palette.filteredSettings.len)
+    for i in 0..<maxItems:
+      let item = palette.filteredSettings[i]
+      let itemY = listY + i * ItemHeight
+      let itemBounds = rect(palette.bounds.x + 8, itemY, palette.bounds.w - 16, ItemHeight)
+      if i == palette.selectedIndex:
+        fillRect(itemBounds, selection)
+      drawIcon(iiGear, itemBounds.x + 8, itemBounds.y + 8)
+      discard drawText(font, itemBounds.x + 28, itemBounds.y + 6, item.label, text, color(0, 0, 0, 0))
+      discard drawText(font, itemBounds.x + 28, itemBounds.y + 24, item.description, textSecondary, color(0, 0, 0, 0))
+      let valueText = item.getValue()
+      let valueWidth = measureText(font, valueText).w
+      discard drawText(font, itemBounds.x + itemBounds.w - valueWidth - 12, itemBounds.y + 12, valueText, accent, color(0, 0, 0, 0))
+
+    if palette.filteredSettings.len == 0:
+      discard drawText(font, palette.bounds.x + 20, listY + 12, "No settings found", textSecondary, color(0, 0, 0, 0))
