@@ -764,6 +764,53 @@ proc lspServerForLanguage(app: App, lang: string): string =
     return app.config.lspServer
   return ""
 
+
+proc findMatchingBracket(text: string; startOff: int): int =
+  ## Return the byte offset of the bracket matching the one at or before startOff,
+  ## or -1 if not found.
+  if text.len == 0:
+    return -1
+  var off = startOff
+  if off >= text.len:
+    off = text.len - 1
+  var ch = text[off]
+  let openToClose = {'(': ')', '[': ']', '{': '}'}.toTable()
+  let closeToOpen = {')': '(', ']': '[', '}': '{'}.toTable()
+  var targetOpen = '\x00'
+  var direction = 0
+  if ch in openToClose:
+    targetOpen = ch
+    direction = 1
+  elif ch in closeToOpen:
+    targetOpen = closeToOpen[ch]
+    direction = -1
+  else:
+    if off > 0:
+      dec off
+      ch = text[off]
+      if ch in openToClose:
+        targetOpen = ch
+        direction = 1
+      elif ch in closeToOpen:
+        targetOpen = closeToOpen[ch]
+        direction = -1
+  if direction == 0:
+    return -1
+  let targetClose = if direction == 1: openToClose[targetOpen] else: ch
+  if targetOpen == '\x00': return -1
+  var depth = 1
+  var i = off + direction
+  while i >= 0 and i < text.len:
+    let c = text[i]
+    if c == targetOpen:
+      inc depth
+    elif c == targetClose:
+      dec depth
+      if depth == 0:
+        return i
+    i += direction
+  return -1
+
 proc lspStatusString(app: App): string =
   if app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
     return "LSP: " & app.lspServer
