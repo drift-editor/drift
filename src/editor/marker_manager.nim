@@ -6,6 +6,7 @@ type
     msDiagnostic
     msColorHighlight
     msBreakpoint
+    msBracketMatch
 
   BufferMarkers* = object
     sources*: array[MarkerSource, seq[tuple[a, b: int, color: Color]]]

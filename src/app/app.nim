@@ -170,6 +170,8 @@ type
     lastStatusText: string
     lastCurrentLine, lastCurrentCol: int
     lastKeybindingsMtime: float
+    lastBracketBuffer: int
+    lastBracketCursorOff: int
 
 const
   TerminalHeight = 200
@@ -810,6 +812,39 @@ proc findMatchingBracket(text: string; startOff: int): int =
         return i
     i += direction
   return -1
+
+
+proc updateBracketMatchMarkers(app: App) =
+  ## Highlight the bracket under the cursor and its matching pair.
+  if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
+    if app.lastBracketBuffer >= 0 and app.lastBracketBuffer < app.buffers.len:
+      app.bufferMarkers[app.lastBracketBuffer].setMarkers(msBracketMatch, @[])
+      applyMarkers(app.buffers[app.lastBracketBuffer].ed, app.bufferMarkers[app.lastBracketBuffer])
+    app.lastBracketBuffer = -1
+    app.lastBracketCursorOff = -1
+    return
+
+  let b = app.buffers[app.currentBuffer]
+  if b.isImage:
+    return
+  let text = b.ed.fullText()
+  let off = offsetAtLineCol(text, b.ed.currentLine, b.ed.currentCol)
+  if app.lastBracketBuffer != app.currentBuffer or app.lastBracketCursorOff != off:
+    # Clear previous buffer markers
+    if app.lastBracketBuffer >= 0 and app.lastBracketBuffer < app.buffers.len and app.lastBracketBuffer != app.currentBuffer:
+      app.bufferMarkers[app.lastBracketBuffer].setMarkers(msBracketMatch, @[])
+      applyMarkers(app.buffers[app.lastBracketBuffer].ed, app.bufferMarkers[app.lastBracketBuffer])
+
+    var markers: seq[tuple[a, b: int, color: uirelays.Color]] = @[]
+    let matchOff = findMatchingBracket(text, off)
+    if matchOff >= 0:
+      let accent = currentTheme.getColor(tcAccent)
+      markers.add((off, off + 1, accent))
+      markers.add((matchOff, matchOff + 1, accent))
+    app.bufferMarkers[app.currentBuffer].setMarkers(msBracketMatch, markers)
+    applyMarkers(app.buffers[app.currentBuffer].ed, app.bufferMarkers[app.currentBuffer])
+    app.lastBracketBuffer = app.currentBuffer
+    app.lastBracketCursorOff = off
 
 proc lspStatusString(app: App): string =
   if app.lspThread != nil and app.lspThread.isReady.load(moAcquire):
@@ -3296,6 +3331,9 @@ proc run*(app: App) =
 
     # Auto-save dirty buffers after delay
     app.checkAutoSave()
+
+    # Update bracket-match markers when cursor moves
+    app.updateBracketMatchMarkers()
 
     # Hot-reload keybindings periodically
     app.reloadKeybindingsIfChanged()
