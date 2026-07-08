@@ -34,6 +34,7 @@ type
     category*: CommandCategory
     keybinding*: string
     action*: proc()
+    actionArg*: proc(arg: string)
     preview*: proc()
 
   PaletteMode* = enum
@@ -122,11 +123,45 @@ proc registerCommand*(palette: CommandPalette,
     preview: preview
   ))
 
+proc registerCommand*(palette: CommandPalette,
+                     id, name, description: string,
+                     category: CommandCategory,
+                     keybinding: string,
+                     action: proc(),
+                     actionArg: proc(arg: string)) =
+  palette.registerCommand(Command(
+    id: id,
+    name: name,
+    description: description,
+    category: category,
+    keybinding: keybinding,
+    action: action,
+    actionArg: actionArg
+  ))
+
 proc clearCommands*(palette: CommandPalette) =
   palette.commands = @[]
   palette.filteredCommands = @[]
 
 proc noOp() {.sideEffect.} = discard
+
+type
+  CommandQuery = object
+    query: string
+    argument: string
+    hasArgument: bool
+
+proc parseCommandQuery(searchText: string): CommandQuery =
+  ## Split "name: argument" input into command query and optional argument.
+  let colonIdx = searchText.find(':')
+  if colonIdx >= 0:
+    result.hasArgument = true
+    result.query = searchText[0..<colonIdx].strip()
+    result.argument = searchText[colonIdx + 1..^1].strip()
+  else:
+    result.query = searchText
+    result.argument = ""
+    result.hasArgument = false
 
 proc registerDefaults*(palette: CommandPalette) =
   palette.registerCommand("file.new", "New File", "Create a new file", ccFile, "Ctrl+N", noOp)
@@ -219,18 +254,23 @@ proc recordCommandUse*(palette: CommandPalette, id: string) =
   palette.recentIds = next
 
 proc filterCommands*(palette: CommandPalette) =
+  let cq = parseCommandQuery(palette.searchText)
   var scored: seq[tuple[cmd: Command, score: float, originalIndex: int]] = @[]
   for i, cmd in palette.commands:
     var score = 0.0
-    if palette.searchText.len > 0:
-      let nameScore = calculateFuzzyScore(cmd.name, palette.searchText)
-      let descScore = calculateFuzzyScore(cmd.description, palette.searchText)
-      score = max(nameScore, descScore * 0.3)
+    if cq.query.len > 0:
+      let nameScore = calculateFuzzyScore(cmd.name, cq.query)
+      let idScore = calculateFuzzyScore(cmd.id, cq.query)
+      let descScore = calculateFuzzyScore(cmd.description, cq.query)
+      score = max(max(nameScore, idScore * 0.8), descScore * 0.3)
+      if cq.hasArgument and cmd.actionArg != nil and score > 0:
+        # Argument-aware commands that match the name part are boosted to the top.
+        score += 10000.0
     let rIdx = recentIndex(palette, cmd.id)
     if rIdx >= 0:
       # Recent commands get a boost; bigger boost for more recently used.
       score += (MaxRecentCommands - rIdx).float * RecentCommandBoost
-    if score > 0 or palette.searchText.len == 0:
+    if score > 0 or cq.query.len == 0:
       scored.add((cmd, score, i))
   # Sort by score descending, then preserve original registration order for ties.
   scored.sort(proc(a, b: tuple[cmd: Command, score: float, originalIndex: int]): int =
@@ -321,7 +361,10 @@ proc handleInput*(palette: CommandPalette, e: Event): bool =
       of pmCommands:
         if palette.selectedIndex < palette.filteredCommands.len:
           let cmd = palette.filteredCommands[palette.selectedIndex]
-          if cmd.action != nil:
+          let cq = parseCommandQuery(palette.searchText)
+          if cq.hasArgument and cmd.actionArg != nil:
+            cmd.actionArg(cq.argument)
+          elif cmd.action != nil:
             cmd.action()
           palette.recordCommandUse(cmd.id)
           palette.hide()
@@ -382,7 +425,10 @@ proc handleInput*(palette: CommandPalette, e: Event): bool =
         if index >= 0 and index < palette.filteredCommands.len:
           palette.selectedIndex = index
           let cmd = palette.filteredCommands[index]
-          if cmd.action != nil:
+          let cq = parseCommandQuery(palette.searchText)
+          if cq.hasArgument and cmd.actionArg != nil:
+            cmd.actionArg(cq.argument)
+          elif cmd.action != nil:
             cmd.action()
           palette.recordCommandUse(cmd.id)
           palette.hide()

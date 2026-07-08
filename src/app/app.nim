@@ -2131,7 +2131,17 @@ proc init*(app: App) =
   app.commandPalette.registerCommand("file.new", "New File", "Create a new file", ccFile, "Ctrl+N",
     proc() = app.newFile())
   app.commandPalette.registerCommand("file.open", "Open File", "Open an existing file", ccFile, "Ctrl+O",
-    proc() = discard app.openFileDialog())
+    proc() = discard app.openFileDialog(),
+    proc(arg: string) =
+      if arg.len == 0:
+        return
+      let root = if app.fileExplorer.rootPath.len > 0: app.fileExplorer.rootPath else: getCurrentDir()
+      let path = if arg.isAbsolute: arg else: root / arg
+      if fileExists(path):
+        discard app.openBuffer(path)
+        app.addRecentFile(path)
+      else:
+        discard app.notificationManager.error("File not found: " & path))
   app.commandPalette.registerCommand("file.save", "Save", "Save current file", ccFile, "Ctrl+S",
     proc() = discard app.saveCurrentBuffer())
   app.commandPalette.registerCommand("file.saveAs", "Save As...", "Save with a new name", ccFile, "Ctrl+Shift+S",
@@ -2286,7 +2296,18 @@ proc init*(app: App) =
             app.addRecentFile(newPath)
           except CatchableError as err:
             discard app.notificationManager.error("Failed to create file: " & err.msg)
-      app.inputDialog.show())
+      app.inputDialog.show(),
+    proc(arg: string) =
+      if arg.len == 0:
+        return
+      let root = if app.fileExplorer.rootPath.len > 0: app.fileExplorer.rootPath else: getCurrentDir()
+      let newPath = if arg.isAbsolute: arg else: root / arg
+      try:
+        writeFile(newPath, "")
+        discard app.openBuffer(newPath)
+        app.addRecentFile(newPath)
+      except CatchableError as err:
+        discard app.notificationManager.error("Failed to create file: " & err.msg))
   app.commandPalette.registerCommand("file.openFolder", "Open Folder...", "Open a workspace folder", ccFile, "",
     proc() =
       discard app.openFolderDialog())
@@ -2329,7 +2350,15 @@ proc init*(app: App) =
               app.buffers[app.currentBuffer].ed.gotoLine(lineNum, 0)
             except ValueError:
               discard
-        app.inputDialog.show())
+        app.inputDialog.show(),
+    proc(arg: string) =
+      if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len or arg.len == 0:
+        return
+      try:
+        let lineNum = parseInt(arg)
+        app.buffers[app.currentBuffer].ed.gotoLine(lineNum, 0)
+      except ValueError:
+        discard)
   app.commandPalette.registerCommand("palette.show", "Command Palette", "Show command palette", ccView, "Ctrl+Shift+P",
     proc() =
       app.commandPalette.switchToCommandMode()
@@ -2522,7 +2551,22 @@ proc init*(app: App) =
       if app.lspThread == nil or not app.lspThread.isReady.load(moAcquire):
         discard app.notificationManager.info("LSP is not ready")
         return
-      app.lspThread.requestDocumentSymbols(b.path))
+      app.lspThread.requestDocumentSymbols(b.path),
+    proc(arg: string) =
+      if arg.len == 0:
+        return
+      if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len:
+        return
+      let b = app.buffers[app.currentBuffer]
+      let lang = languageIdFor(b.path)
+      if b.path.len == 0 or app.lspServerForLanguage(lang).len == 0:
+        discard app.notificationManager.info("Go to Symbol is not available for this file type")
+        return
+      if app.lspThread == nil or not app.lspThread.isReady.load(moAcquire):
+        discard app.notificationManager.info("LSP is not ready")
+        return
+      # Send the query via LSP workspace symbols as a proxy for filtered document symbols.
+      app.lspThread.requestWorkspaceSymbols(arg))
 
   app.commandPalette.registerCommand("workbench.gotoSymbolInWorkspace", "Go to Symbol in Workspace", "Search and jump to symbols across the workspace via LSP", ccView, "Ctrl+T",
     proc() =
