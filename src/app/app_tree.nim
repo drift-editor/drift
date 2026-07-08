@@ -418,7 +418,7 @@ template buildEditorRoot*(app, layout): Node =
                         layout.topBar.h)
   tabNode.zIndex = 5
   tabNode.onMouseDown = proc(n: Node, e: Event): bool =
-    if app.tabBar.handleMouse(point(e.x, e.y), true):
+    if app.tabBar.handleMouse(point(e.x, e.y), true, e.button):
       app.focus = "tabs"
     else:
       app.focus = "editor"

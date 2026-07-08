@@ -28,6 +28,7 @@ type
     scrollOffset*: int
     onTabChange*: proc(tabId: string)
     onTabClose*: proc(tabId: string)
+    onTabMiddleClose*: proc(tabId: string)
     tabsDirty*: bool
     hoverCloseTabIndex*: int
 
@@ -141,24 +142,32 @@ proc setBounds*(bar: TabBar, bounds: Rect) =
 
 # Input
 
-proc handleMouse*(bar: TabBar, pos: Point, pressed: bool): bool =
+proc handleMouse*(bar: TabBar, pos: Point, pressed: bool, button: MouseButton = LeftButton): bool =
   if not bar.bounds.contains(pos):
     return false
   for tab in bar.tabs:
     if tab.bounds.contains(pos):
+      if pressed and button == MiddleButton:
+        if bar.onTabMiddleClose != nil:
+          bar.onTabMiddleClose(tab.id)
+        elif bar.onTabClose != nil:
+          bar.onTabClose(tab.id)
+        else:
+          discard bar.removeTab(tab.id)
+        return true
       let closeBounds = rect(
         tab.bounds.x + tab.bounds.w - CloseButtonSize - 6,
         tab.bounds.y + (TabHeight - CloseButtonSize) div 2,
         CloseButtonSize,
         CloseButtonSize
       )
-      if pressed and closeBounds.contains(pos):
+      if pressed and closeBounds.contains(pos) and button == LeftButton:
         if bar.onTabClose != nil:
           bar.onTabClose(tab.id)
         else:
           discard bar.removeTab(tab.id)
         return true
-      if pressed:
+      if pressed and button == LeftButton:
         discard bar.setActiveTab(tab.id)
       return true
   true
