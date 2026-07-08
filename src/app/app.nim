@@ -1772,6 +1772,13 @@ proc init*(app: App) =
   app.debugPanel.onVariablesRequest = proc(variablesReference: int) =
     if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
       app.dapThread.requestVariables(variablesReference)
+  app.debugPanel.onEvaluate = proc(expression: string) =
+    if app.dapThread != nil and app.dapThread.isReady.load(moAcquire):
+      app.dapThread.requestEvaluate(expression)
+    else:
+      app.debugPanel.addOutput("Debug session not ready")
+  app.debugPanel.onInputFocus = proc() =
+    app.focus = "debugPanel"
 
   # Debug sidebar
   app.debugSidebar = newDebugSidebar()
@@ -2529,6 +2536,9 @@ proc run*(app: App) =
       elif app.focus == "aiPanel" and app.aiPanelVisible:
         if app.aiPanel.handleKey(e):
           discard app.gi.consume()
+      elif app.focus == "debugPanel" and app.bottomPanelTab == "debug":
+        if app.debugPanel.handleKey(e):
+          discard app.gi.consume()
       # Global commands (Ctrl+T, Ctrl+F, etc.)
       elif app.commands.dispatch(e):
         discard app.gi.consume()
@@ -2574,6 +2584,9 @@ proc run*(app: App) =
           discard app.gi.consume()
       elif app.focus == "debug" and app.showDebugPanel:
         if app.debugSidebar.handleInput(e):
+          discard app.gi.consume()
+      elif app.focus == "debugPanel" and app.bottomPanelTab == "debug":
+        if app.debugPanel.handleTextInput(e):
           discard app.gi.consume()
       elif app.focus == "aiPanel" and app.aiPanelVisible:
         if app.aiPanel.handleTextInput(e):
@@ -3150,6 +3163,22 @@ proc run*(app: App) =
       of dmkVariablesResponse:
         let variables = parseVariables(resp.jsonData)
         app.debugPanel.addVariables(resp.int1, variables)
+      of dmkEvaluateResponse:
+        if resp.jsonData.hasKey("success") and not resp.jsonData["success"].getBool():
+          let msg = if resp.jsonData.hasKey("message"): resp.jsonData["message"].getStr() else: "evaluate failed"
+          app.debugPanel.addOutput("Error: " & msg)
+        elif resp.jsonData.hasKey("body"):
+          let body = resp.jsonData["body"]
+          let val = if body.hasKey("result"): body["result"].getStr() else: ""
+          let typ = if body.hasKey("type"): body["type"].getStr() else: ""
+          var line = val
+          if typ.len > 0:
+            line.add("  (")
+            line.add(typ)
+            line.add(")")
+          app.debugPanel.addOutput(line)
+        else:
+          app.debugPanel.addOutput("evaluate returned empty response")
       else:
         discard
       # Sync debug panel state to sidebar

@@ -406,3 +406,11 @@ proc requestDisconnect*(client: DAPClient) {.async.} =
   if not client.isReady: return
   discard await client.sendRequest("disconnect", newJObject())
   client.state = dapShutdown
+
+proc requestEvaluate*(client: DAPClient; expression: string; context: string = "repl"; frameId: int = 0): Future[JsonNode] {.async.} =
+  if not client.isReady:
+    return newJObject()
+  var args = %*{ "expression": expression, "context": context }
+  if frameId > 0:
+    args["frameId"] = %frameId
+  result = await client.sendRequest("evaluate", args)

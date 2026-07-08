@@ -1,6 +1,6 @@
 ## Debug panel — displays DAP debugging state, call stack, variables, and output.
 
-import std/[os, strutils]
+import std/[os, strutils, unicode]
 import uirelays
 import uirelays/screen
 import uirelays/input
@@ -10,7 +10,8 @@ import ../core/debug_types
 const
   DbgSectionHeight* = 26
   DbgRowHeight* = 22
-  DbgOutputHeight* = 120
+  DbgInputHeight* = 24
+  DbgOutputHeight* = 96
   DbgStackMaxHeight* = 120
   DbgIndentWidth* = 16
 
@@ -33,8 +34,13 @@ type
     varScrollOffset*: int
     hoverStackRow*: int
     hoverVarRow*: int
+    inputText*: string
+    inputFocused*: bool
+    inputCursorPos*: int
     onNavigate*: proc(path: string; line, col: int)
     onVariablesRequest*: proc(variablesReference: int)
+    onEvaluate*: proc(expression: string)
+    onInputFocus*: proc()
 
 # Panel lifecycle
 
@@ -48,8 +54,13 @@ proc newDebugPanel*(): DebugPanel =
     varScrollOffset: 0,
     hoverStackRow: -1,
     hoverVarRow: -1,
+    inputText: "",
+    inputFocused: false,
+    inputCursorPos: 0,
     onNavigate: nil,
-    onVariablesRequest: nil
+    onVariablesRequest: nil,
+    onEvaluate: nil,
+    onInputFocus: nil
   )
 
 proc clear*(panel: DebugPanel) =
@@ -61,12 +72,120 @@ proc clear*(panel: DebugPanel) =
   panel.varScrollOffset = 0
   panel.hoverStackRow = -1
   panel.hoverVarRow = -1
+  panel.inputText = ""
+  panel.inputFocused = false
+  panel.inputCursorPos = 0
+
+proc inputPrevBoundary(s: string; bytePos: int): int =
+  if bytePos <= 0: return 0
+  var off = 0
+  var prev = 0
+  for r in s.toRunes():
+    off += ($r).len
+    if off >= bytePos:
+      return prev
+    prev = off
+  return prev
+
+proc inputNextBoundary(s: string; bytePos: int): int =
+  if bytePos >= s.len: return s.len
+  var off = 0
+  for r in s.toRunes():
+    off += ($r).len
+    if off > bytePos:
+      return off
+  return s.len
 
 proc addOutput*(panel: DebugPanel; text: string) =
   for line in text.splitLines():
     panel.output.add(line)
   if panel.output.len > 500:
     panel.output = panel.output[^500..^1]
+
+proc submitInput*(panel: DebugPanel) =
+  let expr = panel.inputText.strip()
+  if expr.len == 0:
+    return
+  panel.addOutput("> " & expr)
+  panel.inputText = ""
+  panel.inputCursorPos = 0
+  if panel.onEvaluate != nil:
+    panel.onEvaluate(expr)
+
+proc handleKey*(panel: DebugPanel; e: Event): bool =
+  if e.kind != KeyDownEvent:
+    return false
+  if not panel.inputFocused:
+    return false
+
+  case e.key
+  of KeyEnter:
+    panel.submitInput()
+    return true
+  of KeyEsc:
+    panel.inputFocused = false
+    return true
+  of KeyBackspace:
+    if panel.inputCursorPos > 0:
+      let start = inputPrevBoundary(panel.inputText, panel.inputCursorPos)
+      panel.inputText = panel.inputText[0..<start] & panel.inputText[panel.inputCursorPos..^1]
+      panel.inputCursorPos = start
+    return true
+  of KeyDelete:
+    if panel.inputCursorPos < panel.inputText.len:
+      let endPos = inputNextBoundary(panel.inputText, panel.inputCursorPos)
+      panel.inputText = panel.inputText[0..<panel.inputCursorPos] & panel.inputText[endPos..^1]
+    return true
+  of KeyLeft:
+    if panel.inputCursorPos > 0:
+      panel.inputCursorPos = inputPrevBoundary(panel.inputText, panel.inputCursorPos)
+    return true
+  of KeyRight:
+    if panel.inputCursorPos < panel.inputText.len:
+      panel.inputCursorPos = inputNextBoundary(panel.inputText, panel.inputCursorPos)
+    return true
+  of KeyHome:
+    panel.inputCursorPos = 0
+    return true
+  of KeyEnd:
+    panel.inputCursorPos = panel.inputText.len
+    return true
+  of KeyV:
+    let pasteMod = when defined(macosx): GuiPressed else: CtrlPressed
+    if pasteMod in e.mods:
+      let text = getClipboardText()
+      if text.len > 0:
+        var clean = text
+        while clean.len > 0 and clean[^1] == '\0':
+          clean.setLen(clean.len - 1)
+        if clean.len > 0:
+          if panel.inputCursorPos < panel.inputText.len:
+            panel.inputText = panel.inputText[0..<panel.inputCursorPos] & clean & panel.inputText[panel.inputCursorPos..^1]
+          else:
+            panel.inputText.add(clean)
+          panel.inputCursorPos += clean.len
+          return true
+  else:
+    discard
+  false
+
+proc handleTextInput*(panel: DebugPanel; e: Event): bool =
+  if not panel.inputFocused or e.kind != TextInputEvent:
+    return false
+  if e.text.len == 0:
+    return false
+  var text = ""
+  for c in e.text:
+    if c == '\0': break
+    text.add(c)
+  if text.len == 0 or text == "\b" or text == "\x7F":
+    return false
+  if panel.inputCursorPos < panel.inputText.len:
+    panel.inputText = panel.inputText[0..<panel.inputCursorPos] & text & panel.inputText[panel.inputCursorPos..^1]
+  else:
+    panel.inputText.add(text)
+  panel.inputCursorPos += text.len
+  return true
 
 proc clearVariables*(panel: DebugPanel) =
   panel.varNodes = @[]
@@ -152,6 +271,7 @@ proc render*(panel: DebugPanel; bounds: Rect; font: Font; uiFont: Font) =
   let textMuted = currentTheme.getColor(tcTextSecondary)
   let successC  = currentTheme.getColor(tcSuccess)
   let errorC    = currentTheme.getColor(tcError)
+  let accentC   = currentTheme.getColor(tcAccent)
 
   fillRect(bounds, bg)
   fillRect(rect(bounds.x + bounds.w - 1, bounds.y, 1, bounds.h), borderC)
@@ -217,7 +337,8 @@ proc render*(panel: DebugPanel; bounds: Rect; font: Font; uiFont: Font) =
 
   let varHeaderY = y
   let outputY = bounds.y + bounds.h - DbgOutputHeight
-  let varAreaH = max(0, outputY - 4 - y)
+  let inputY = outputY - DbgInputHeight
+  let varAreaH = max(0, inputY - 4 - y)
 
   saveState()
   setClipRect(rect(bounds.x, y, bounds.w, varAreaH))
@@ -249,6 +370,32 @@ proc render*(panel: DebugPanel; bounds: Rect; font: Font; uiFont: Font) =
     discard drawText(font, indentX, rowY + 3, displayText, textColor, color(0, 0, 0, 0))
     rowY += DbgRowHeight
 
+  restoreState()
+
+  # Input section
+  fillRect(rect(bounds.x + 4, inputY - 4, bounds.w - 8, 1), borderC)
+  discard drawText(font, bounds.x + 8, inputY, "> ", textMuted, color(0, 0, 0, 0))
+  let promptW = measureText(font, "> ").w
+  let inputX = bounds.x + 8 + promptW + 4
+  let inputW = max(0, bounds.w - (inputX - bounds.x) - 12)
+  let inputBg = if panel.inputFocused: bgHover else: bg
+  fillRect(rect(inputX, inputY, inputW, DbgInputHeight), inputBg)
+  let inputBorderC = if panel.inputFocused: accentC else: borderC
+  fillRect(rect(inputX, inputY, inputW, 1), inputBorderC)
+  fillRect(rect(inputX, inputY + DbgInputHeight - 1, inputW, 1), inputBorderC)
+  fillRect(rect(inputX, inputY, 1, DbgInputHeight), inputBorderC)
+  fillRect(rect(inputX + inputW - 1, inputY, 1, DbgInputHeight), inputBorderC)
+
+  saveState()
+  setClipRect(rect(inputX, inputY, inputW, DbgInputHeight))
+  discard drawText(font, inputX + 4, inputY + 4, panel.inputText, textC, color(0, 0, 0, 0))
+  if panel.inputFocused:
+    let cursorPrefix = if panel.inputCursorPos < panel.inputText.len:
+      panel.inputText[0..<panel.inputCursorPos]
+    else:
+      panel.inputText
+    let cursorX = inputX + 4 + measureText(font, cursorPrefix).w
+    fillRect(rect(cursorX, inputY + 4, 1, DbgInputHeight - 8), textC)
   restoreState()
 
   # Output section
@@ -283,7 +430,8 @@ proc handleMouse*(panel: DebugPanel; e: Event; bounds: Rect): bool =
   let stackAreaH = min(stackContentH, DbgStackMaxHeight)
   let varHeaderY = stackHeaderY + stackAreaH + 4 + DbgSectionHeight
   let outputY = bounds.y + bounds.h - DbgOutputHeight
-  let varAreaH = max(0, outputY - 4 - varHeaderY)
+  let inputY = outputY - DbgInputHeight
+  let varAreaH = max(0, inputY - 4 - varHeaderY)
 
   if e.kind == MouseWheelEvent:
     # Wheel over stack area
@@ -292,7 +440,7 @@ proc handleMouse*(panel: DebugPanel; e: Event; bounds: Rect): bool =
       panel.stackScrollOffset = clamp(panel.stackScrollOffset - e.y * DbgRowHeight, 0, maxScroll)
       return true
     # Wheel over variables area
-    if e.y >= varHeaderY and e.y < outputY - 4:
+    if e.y >= varHeaderY and e.y < inputY - 4:
       let flatVars = panel.flattenVariables()
       let varContentH = flatVars.len * DbgRowHeight
       let maxScroll = max(0, varContentH - varAreaH)
@@ -302,6 +450,7 @@ proc handleMouse*(panel: DebugPanel; e: Event; bounds: Rect): bool =
 
   # Stack area
   if e.y >= stackHeaderY and e.y < stackHeaderY + stackAreaH:
+    panel.inputFocused = false
     let relY = e.y - stackHeaderY + panel.stackScrollOffset
     let rowIdx = relY div DbgRowHeight
     case e.kind
@@ -322,7 +471,8 @@ proc handleMouse*(panel: DebugPanel; e: Event; bounds: Rect): bool =
       discard
 
   # Variables area
-  if e.y >= varHeaderY and e.y < outputY - 4:
+  if e.y >= varHeaderY and e.y < inputY - 4:
+    panel.inputFocused = false
     let flatVars = panel.flattenVariables()
     let relY = e.y - varHeaderY + panel.varScrollOffset
     let rowIdx = relY div DbgRowHeight
@@ -345,6 +495,22 @@ proc handleMouse*(panel: DebugPanel; e: Event; bounds: Rect): bool =
             if node.children.len == 0 and not node.loading and panel.onVariablesRequest != nil:
               node.loading = true
               panel.onVariablesRequest(node.variablesReference)
+      return true
+    else:
+      discard
+
+  # Input area
+  if e.y >= inputY and e.y < outputY - 4:
+    case e.kind
+    of MouseDownEvent:
+      panel.inputFocused = true
+      panel.inputCursorPos = panel.inputText.len
+      if panel.onInputFocus != nil:
+        panel.onInputFocus()
+      return true
+    of MouseMoveEvent:
+      panel.hoverStackRow = -1
+      panel.hoverVarRow = -1
       return true
     else:
       discard
