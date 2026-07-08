@@ -78,6 +78,10 @@ template initCommands*(app: untyped): untyped =
     app.commands.bindKey({CtrlPressed, ShiftPressed}, KeyR, "git.reviewChanges")
     app.commands.register("git.reviewChanges") do (): app.reviewChanges()
 
+    app.commands.register("git.copyOldHunk") do (): app.copyOldHunk()
+    app.commands.register("git.copyNewHunk") do (): app.copyNewHunk()
+    app.commands.register("git.revertHunk") do (): app.revertCurrentHunk()
+
     app.commands.bindKey({CtrlPressed, ShiftPressed}, KeyM, "view.toggleProblems")
     app.commands.register("view.toggleProblems") do ():
       app.showTerminal = true

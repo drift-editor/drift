@@ -1046,6 +1046,56 @@ proc reviewChanges*(app: App) =
   app.aiPanel.isStreaming = true
   if app.tooltip.visible: app.tooltip.hideTooltip()
 
+proc copyOldHunk(app: App) =
+  ## Copy the old-file text of the unstaged diff hunk at the cursor line.
+  if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len: return
+  let b = app.buffers[app.currentBuffer]
+  if b.path.len == 0 or b.diffPath.len > 0: return
+  let hunks = parseDiffHunks(b.path, staged = false)
+  let idx = findHunkAtLine(hunks, b.ed.currentLine)
+  if idx < 0:
+    discard app.notificationManager.info("No unstaged hunk at the current line")
+    return
+  let text = hunkOldText(hunks[idx])
+  if text.len == 0: return
+  putClipboardText(text)
+  app.pushClipboardHistory(text)
+
+proc copyNewHunk(app: App) =
+  ## Copy the new-file text of the unstaged diff hunk at the cursor line.
+  if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len: return
+  let b = app.buffers[app.currentBuffer]
+  if b.path.len == 0 or b.diffPath.len > 0: return
+  let hunks = parseDiffHunks(b.path, staged = false)
+  let idx = findHunkAtLine(hunks, b.ed.currentLine)
+  if idx < 0:
+    discard app.notificationManager.info("No unstaged hunk at the current line")
+    return
+  let text = hunkNewText(hunks[idx])
+  if text.len == 0: return
+  putClipboardText(text)
+  app.pushClipboardHistory(text)
+
+proc revertCurrentHunk(app: App) =
+  ## Revert the unstaged diff hunk at the cursor line.
+  if app.currentBuffer < 0 or app.currentBuffer >= app.buffers.len: return
+  let b = app.buffers[app.currentBuffer]
+  if b.path.len == 0 or b.diffPath.len > 0: return
+  if b.ed.changed:
+    discard app.notificationManager.warning("Save the file before reverting a hunk")
+    return
+  let hunks = parseDiffHunks(b.path, staged = false)
+  let idx = findHunkAtLine(hunks, b.ed.currentLine)
+  if idx < 0:
+    discard app.notificationManager.info("No unstaged hunk at the current line")
+    return
+  if revertHunk(b.path, hunks[idx]):
+    app.buffers[app.currentBuffer].ed.loadFromFile(b.path)
+    app.buffers[app.currentBuffer].lastChanged = false
+    discard app.notificationManager.info("Reverted hunk")
+  else:
+    discard app.notificationManager.error("Failed to revert hunk")
+
 proc showBranchMenu(app: App, bounds: coords.Rect) =
   app.branchMenu.items = @[]
   let branches = app.gitPanel.listBranches()
@@ -1927,6 +1977,12 @@ proc init*(app: App) =
       if app.showTerminal: app.focus = "term" else: app.focus = "editor")
   app.commandPalette.registerCommand("git.reviewChanges", "Review Changes", "Send local git changes to AI for review", ccGit, "Ctrl+Shift+R",
     proc() = app.reviewChanges())
+  app.commandPalette.registerCommand("git.copyOldHunk", "Copy Old Hunk", "Copy the original text of the diff hunk at the cursor line", ccGit, "",
+    proc() = app.copyOldHunk())
+  app.commandPalette.registerCommand("git.copyNewHunk", "Copy New Hunk", "Copy the changed text of the diff hunk at the cursor line", ccGit, "",
+    proc() = app.copyNewHunk())
+  app.commandPalette.registerCommand("git.revertHunk", "Revert Hunk", "Revert the unstaged diff hunk at the cursor line", ccGit, "",
+    proc() = app.revertCurrentHunk())
   app.commandPalette.registerCommand("view.toggleGit", "Toggle Git Panel", "Show or hide the Git panel", ccView, "Ctrl+Shift+G",
     proc() =
       app.showGitPanel = not app.showGitPanel
