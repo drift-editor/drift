@@ -2981,7 +2981,7 @@ proc run*(app: App) =
             app.updateTitle()
             app.updateStatus()
             discard app.gi.consume()
-        elif idx == app.statusBar.encodingIndex:
+        elif idx == app.statusBar.encodingIndex and app.statusBar.encodingIndex >= 0:
           # UTF-8 is the only supported encoding for now; show a notification.
           discard app.notificationManager.info("Encoding is fixed to UTF-8")
       # Right-click context menu
