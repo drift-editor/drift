@@ -94,8 +94,6 @@ proc iconFileName(id: IconId): string =
 
 proc loadIcons*() =
   let baseDir = currentSourcePath().parentDir / ".." / ".." / "resources" / "icons" / "codicons"
-  let tmpDir = getTempDir() / "drift_icons"
-  createDir(tmpDir)
 
   for id in IconId.low..IconId.high:
     if id == iiNone: continue
@@ -111,13 +109,11 @@ proc loadIcons*() =
       let scaledSize = IconSize * iconScale
       let svg = parseSvg(svgData, scaledSize, scaledSize)
       let img = newImage(svg)
-      let pngPath = tmpDir / ($id & ".png")
-      img.writeFile(pngPath)
-      let handle = screen.loadImage(pngPath)
+      let handle = screen.createImage(addr img.data[0], img.width, img.height)
       if handle.int != 0:
         iconImages[id] = handle
       else:
-        echo "[icons] failed to load: ", pngPath
+        echo "[icons] failed to load: ", svgPath
     except CatchableError as e:
       echo "[icons] error loading ", svgPath, ": ", e.msg
 
