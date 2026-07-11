@@ -932,6 +932,7 @@ proc updateStatus(app: App) =
   var rightSections: seq[string]
   var lspIdx = -1
   var dapIdx = -1
+  var aiIdx = -1
   var currLine = 0
   var currCol = 0
   let branch = app.gitPanel.currentBranch
@@ -944,9 +945,10 @@ proc updateStatus(app: App) =
       @[branchLabel, "No file"]
     else:
       @["No file"]
-    rightSections = @[app.lspStatusString(), app.dapStatusString()]
+    rightSections = @[app.lspStatusString(), app.dapStatusString(), "AI"]
     lspIdx = 0
     dapIdx = 1
+    aiIdx = 2
   else:
     let b = app.buffers[app.currentBuffer]
     let name = if b.path.len > 0: b.path.extractFilename else: "untitled"
@@ -955,15 +957,18 @@ proc updateStatus(app: App) =
       rightSections = @[
         $b.imageWidth & " x " & $b.imageHeight,
         app.lspStatusString(),
-        app.dapStatusString()
+        app.dapStatusString(),
+        "AI"
       ]
       lspIdx = 1
       dapIdx = 2
+      aiIdx = 3
     elif b.diffPath.len > 0:
       leftSections = @[name]
-      rightSections = @["Diff", app.lspStatusString(), app.dapStatusString()]
+      rightSections = @["Diff", app.lspStatusString(), app.dapStatusString(), "AI"]
       lspIdx = 1
       dapIdx = 2
+      aiIdx = 3
       app.statusBar.lineEndingIndex = -1
       app.statusBar.encodingIndex = -1
     else:
@@ -983,10 +988,12 @@ proc updateStatus(app: App) =
         lineEnding,
         lang,
         app.lspStatusString(),
-        app.dapStatusString()
+        app.dapStatusString(),
+        "AI"
       ]
       lspIdx = 4
       dapIdx = 5
+      aiIdx = 6
       app.statusBar.encodingIndex = 1
       app.statusBar.lineEndingIndex = 2
 
@@ -999,12 +1006,14 @@ proc updateStatus(app: App) =
     else:
       newSeq[IconId](leftSections.len)
     app.statusBar.rightIcons = newSeq[IconId](rightSections.len)
+    app.statusBar.rightIcons[^1] = iiSparkle
     app.statusBar.rightColors = @[]
     for _ in 0 ..< rightSections.len:
       app.statusBar.rightColors.add(color(0, 0, 0, 0))
     app.statusBar.activeRightIndex = -1
     app.statusBar.lspIndex = lspIdx
     app.statusBar.dapIndex = dapIdx
+    app.statusBar.aiIndex = aiIdx
     app.lastStatusText = statusText
     app.lastCurrentLine = currLine
     app.lastCurrentCol = currCol
@@ -1075,6 +1084,9 @@ proc sectionBoundsAtIndex(app: App, statusBounds: coords.Rect, idx: int): coords
     if i == idx:
       return rect(x, statusBounds.y, w, statusBounds.h)
     x += w
+
+proc aiSectionBounds(app: App, statusBounds: coords.Rect): coords.Rect =
+  sectionBoundsAtIndex(app, statusBounds, app.statusBar.aiIndex)
 
 proc pathStartsWith(path, prefix: string): bool =
   ## Cross-platform path prefix check normalizing both separators.

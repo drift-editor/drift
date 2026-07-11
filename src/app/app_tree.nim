@@ -282,6 +282,23 @@ template buildEditorRoot*(app, layout): Node =
     true
   root.addChild(statusNode)
 
+  # Clickable sections as child nodes — event delegation via node tree
+  let aiBounds = app.aiSectionBounds(layout.status)
+  if aiBounds.w > 0:
+    let aiNode = newNode("aiSection")
+    aiNode.bounds = aiBounds
+    aiNode.zIndex = 5
+    aiNode.onMouseDown = proc(n: Node, e: Event): bool =
+      app.aiPanelVisible = not app.aiPanelVisible
+      if app.aiPanelVisible:
+        app.focus = "aiPanel"
+        app.aiPanel.focused = true
+      elif app.focus == "aiPanel":
+        app.focus = "editor"
+      true
+    aiNode.setCursorStyle(curHand)
+    statusNode.addChild(aiNode)
+
   let lspBounds = app.lspSectionBounds(layout.status)
   if lspBounds.w > 0:
     let lspNode = newNode("lspSection")
