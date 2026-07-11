@@ -8,7 +8,7 @@ srcDir        = "src"
 bin           = @["drift"]
 
 requires "nim >= 2.0.2"
-requires "chronos"
+requires "chronos >= 4.2"
 requires "https://github.com/bung87/lsp_client >= 0.5.0"
 requires "pixie >= 5.0.0"
 requires "yaml"
