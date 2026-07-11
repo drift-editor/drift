@@ -3,7 +3,8 @@ when defined(macosx):
   switch("passC", "-Wno-incompatible-function-pointer-types")
 # begin Nimble config (version 2)
 when withDir(thisDir(), system.fileExists("nimble.paths")):
-  when defined(linux):
+  when defined(linux) and (existsEnv("WSL_DISTRO_NAME") or existsEnv("WSL_INTEROP")):
+    # WSL: convert Windows paths from nimble.paths to /mnt/ paths
     import std/strutils
     for line in readFile("nimble.paths").splitLines():
       if line.startsWith("--path:"):
