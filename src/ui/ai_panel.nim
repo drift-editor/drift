@@ -188,6 +188,7 @@ proc sendCurrentMessage*(panel: AIPanel) =
 
 proc clearChat*(panel: AIPanel) =
   panel.messages = @[]
+  panel.invalidateBubbleCache()
   panel.scrollOffset = 0
   panel.isStreaming = false
   panel.inputText = ""

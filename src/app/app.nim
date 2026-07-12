@@ -20,12 +20,9 @@ import ../core/keybindings as kb
 import ../editor/[marker_manager, color_highlight, git_diff, sticky_scroll, auto_close]
 import ../utils/text
 import ../utils/file_watcher
+import ../utils/file
 import app_layout, app_cursors, event_router, app_tree, app_commands, commands
 import ../ui/diff_view
-
-proc isImageFile(path: string): bool =
-  let ext = path.splitFile.ext.toLowerAscii()
-  ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"]
 
 type
   Buffer = object
@@ -730,30 +727,6 @@ proc langToString(lang: SourceLanguage): string =
   of langMarkdown: "MARKDOWN"
   of langNone: "PLAIN"
 
-proc detectLineEnding(text: string): string =
-  if text.contains("\c\L"): "CRLF"
-  else: "LF"
-
-proc languageIdFor(path: string): string =
-  ## Map a file path to an LSP language identifier based on its extension.
-  if path.len == 0:
-    return "nim"
-  let ext = path.splitFile.ext.toLowerAscii()
-  case ext
-  of ".nim", ".nims": "nim"
-  of ".py": "python"
-  of ".js", ".jsx": "javascript"
-  of ".ts", ".tsx": "typescript"
-  of ".c", ".h": "c"
-  of ".cpp", ".cc", ".cxx", ".hpp": "cpp"
-  of ".cs": "csharp"
-  of ".java": "java"
-  of ".rs": "rust"
-  of ".html", ".htm": "html"
-  of ".xml": "xml"
-  of ".md", ".markdown": "markdown"
-  else: ""
-
 proc lspServerForLanguage(app: App, lang: string): string =
   ## Resolve the configured LSP server for a language, falling back to the
   ## legacy single `lspServer` value for Nim or when the per-language table
@@ -1088,12 +1061,6 @@ proc sectionBoundsAtIndex(app: App, statusBounds: coords.Rect, idx: int): coords
 proc aiSectionBounds(app: App, statusBounds: coords.Rect): coords.Rect =
   sectionBoundsAtIndex(app, statusBounds, app.statusBar.aiIndex)
 
-proc pathStartsWith(path, prefix: string): bool =
-  ## Cross-platform path prefix check normalizing both separators.
-  let normPath = path.replace('\\', '/')
-  let normPrefix = prefix.replace('\\', '/')
-  normPath.startsWith(normPrefix & "/")
-
 proc pushClipboardHistory*(app: App, text: string) =
   ## Add text to the clipboard ring, removing duplicates and capping at config size.
   if text.len == 0 or app.config.clipboardHistorySize <= 0:
@@ -1182,37 +1149,6 @@ proc diagSectionBounds(app: App, statusBounds: coords.Rect): coords.Rect =
       return rect(x, statusBounds.y, totalW, statusBounds.h)
     x += w
 
-type
-  ChangeGroup* = object
-    name*: string
-    files*: seq[string]
-    diff*: string
-
-proc groupFilesByConcern*(files: seq[GitFileChange]): seq[ChangeGroup] =
-  ## Group changed files by logical concern based on path/extension.
-  var src, tests, config, docs, build, other: seq[string]
-  for f in files:
-    let path = f.path.toLowerAscii()
-    if path.endsWith("_test.nim") or path.contains("/tests/") or path.startsWith("tests/"):
-      tests.add(f.path)
-    elif path.endsWith(".nim") or path.endsWith(".nims") or path.endsWith(".cfg"):
-      src.add(f.path)
-    elif path.endsWith(".json") or path.endsWith(".yaml") or path.endsWith(".yml") or path.endsWith(".toml") or path == ".gitignore":
-      config.add(f.path)
-    elif path.endsWith(".md") or path.endsWith(".rst") or path.endsWith(".txt"):
-      docs.add(f.path)
-    elif path.endsWith(".nimble") or path.contains("makefile") or path.endsWith(".sh"):
-      build.add(f.path)
-    else:
-      other.add(f.path)
-
-  if src.len > 0: result.add(ChangeGroup(name: "Source Code", files: src))
-  if tests.len > 0: result.add(ChangeGroup(name: "Tests", files: tests))
-  if config.len > 0: result.add(ChangeGroup(name: "Configuration", files: config))
-  if docs.len > 0: result.add(ChangeGroup(name: "Documentation", files: docs))
-  if build.len > 0: result.add(ChangeGroup(name: "Build / Scripts", files: build))
-  if other.len > 0: result.add(ChangeGroup(name: "Other", files: other))
-
 proc reviewChanges*(app: App) =
   ## Lazy agentic review: send only file list + stats, let the agent explore files and diffs via tools.
   let repoRoot = if app.gitPanel.currentPath.len > 0: app.gitPanel.currentPath else: getCurrentDir()
@@ -1221,29 +1157,9 @@ proc reviewChanges*(app: App) =
     return
 
   let allStatus = gitcmd.parseGitStatus(repoRoot)
-  var stagedFiles, unstagedFiles: seq[GitFileChange]
-  for f in allStatus:
-    if f.stagedStatus != gfsUnmodified:
-      stagedFiles.add(f)
-    if f.workingStatus != gfsUnmodified:
-      unstagedFiles.add(f)
-
-  if stagedFiles.len == 0 and unstagedFiles.len == 0:
-    discard app.notificationManager.info("No local changes to review")
-    return
-
-  # Build deduplicated file list
-  var allFiles = stagedFiles
-  for u in unstagedFiles:
-    var found = false
-    for a in allFiles:
-      if a.path == u.path:
-        found = true
-        break
-    if not found: allFiles.add(u)
 
   var fileList = ""
-  for f in allFiles:
+  for f in allStatus:
     var parts: seq[string]
     if f.stagedStatus != gfsUnmodified:
       parts.add("staged")
@@ -1253,6 +1169,10 @@ proc reviewChanges*(app: App) =
       else:
         parts.add("unstaged")
     fileList.add("- " & f.path & " (" & parts.join(", ") & ")\n")
+
+  if fileList.len == 0:
+    discard app.notificationManager.info("No local changes to review")
+    return
 
   let branch = gitcmd.getCurrentBranch(repoRoot)
 
@@ -1269,8 +1189,6 @@ proc reviewChanges*(app: App) =
   prompt.add("2. **Issues** — bugs, anti-patterns, or concerns (with line references)\n")
   prompt.add("3. **Suggestions** — specific improvements with reasoning\n")
   prompt.add("4. **Approval status** — Approve / Request changes / Needs discussion\n")
-
-  discard app.notificationManager.info("Requesting AI review of " & $allFiles.len & " changed file(s)...")
 
   app.aiPanelVisible = true
   if app.aiThread == nil:
@@ -1694,24 +1612,6 @@ proc handleDiagnostics(app: App; msg: JsonNode) =
     app.bufferMarkers[targetIdx].setMarkers(msDiagnostic, diagMarkers)
     applyMarkers(app.buffers[targetIdx].ed, app.bufferMarkers[targetIdx])
     applyLineDecorations(app, targetIdx)
-
-proc isBinaryFile(path: string): bool =
-  if not fileExists(path):
-    return false
-  try:
-    let f = open(path, fmRead)
-    defer: f.close()
-    var buf: array[8192, char]
-    let read = f.readChars(toOpenArray(buf, 0, buf.len - 1))
-    for i in 0 ..< read:
-      if buf[i] == '\0':
-        return true
-    # Limitation: only the first 8KB is scanned; null bytes beyond this
-    # point will go undetected. For robust detection the whole file should
-    # be scanned in chunks.
-  except CatchableError:
-    return true
-  return false
 
 proc openBuffer(app: App, path: string): int =
   for i, b in app.buffers:

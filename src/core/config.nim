@@ -85,7 +85,7 @@ proc defaultConfig*(): AppConfig =
     dapServer: "nim_debug_adapter",
     dapConfig: newJObject(),
     aiEnabled: true,
-    aiAgent: "kimi",
+    aiAgent: "builtin",
     aiModel: "kimi-for-coding",
     aiCommand: "",
     aiModelPreset: "lightweight",
