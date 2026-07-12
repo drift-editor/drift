@@ -127,7 +127,7 @@ proc allBuiltinModels*(config: AppConfig): seq[tuple[providerId, model, label: s
   ## to models the user has enabled.
   for mp in BuiltinModelProviders:
     for m in mp.models:
-      if isBuiltinModelEnabled(config, mp.id, m):
+      if isModelEnabled(config, mp.id, m):
         result.add((mp.id, m, mp.label & " — " & m))
 
 proc allBuiltinModels*(): seq[tuple[providerId, model, label: string]] =
@@ -285,7 +285,7 @@ proc doChatCompletionWithModel*(config: AppConfig, prompt, providerId, model: st
   ## Synchronous HTTP call to a specific provider/model (single-turn).
   ## Returns the assistant message content, or an error string starting with
   ## "HTTP error", "Request failed", "Unexpected response", or "Model disabled".
-  if not isBuiltinModelEnabled(config, providerId, model):
+  if not isModelEnabled(config, providerId, model):
     return "Model disabled: " & providerId & "/" & model
   var baseUrl = config.aiBaseUrl
   if baseUrl.len == 0:
@@ -348,7 +348,7 @@ Respond with exactly one word: YES or NO.
 User message: """ & userText & "\n\nAnswer:"
   let provider = config.aiLightweightModelProvider
   let model = config.aiLightweightModel
-  if provider.len == 0 or model.len == 0 or not isBuiltinModelEnabled(config, provider, model):
+  if provider.len == 0 or model.len == 0 or not isModelEnabled(config, provider, model):
     return false
   let answer = doChatCompletionWithModel(config, classifierPrompt, provider, model).strip().toLowerAscii()
   return answer.startsWith("yes")
@@ -410,7 +410,7 @@ proc doChatCompletion*(config: AppConfig, prompt: string): string =
   let (providerId, model) = resolveBuiltinModel(config, prompt)
   if providerId.len == 0 or model.len == 0:
     return "Model disabled"
-  if not isBuiltinModelEnabled(config, providerId, model):
+  if not isModelEnabled(config, providerId, model):
     return "Model disabled: " & providerId & "/" & model
   var baseUrl = config.aiBaseUrl
   if baseUrl.len == 0:
@@ -452,7 +452,7 @@ proc doChatCompletionHistory*(config: AppConfig, prompt: string,
   let (providerId, model) = resolveBuiltinModel(config, prompt)
   if providerId.len == 0 or model.len == 0:
     return "Model disabled"
-  if not isBuiltinModelEnabled(config, providerId, model):
+  if not isModelEnabled(config, providerId, model):
     return "Model disabled: " & providerId & "/" & model
   var baseUrl = config.aiBaseUrl
   if baseUrl.len == 0:
@@ -712,7 +712,7 @@ proc doAgenticChat*(config: AppConfig, providerId, model: string,
   ## request opts into thinking mode at that reasoning effort and the reply's
   ## chain-of-thought is captured in ``result.reasoning``.
   ## Returns an error immediately if the requested model is disabled.
-  if not isBuiltinModelEnabled(config, providerId, model):
+  if not isModelEnabled(config, providerId, model):
     result.error = "Model disabled: " & providerId & "/" & model
     return
   var baseUrl = config.aiBaseUrl

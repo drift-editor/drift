@@ -117,7 +117,7 @@ template initCommands*(app: untyped): untyped =
 
     # Theme selector (no default keybinding; shortcut reused for reopen closed tab)
     app.commands.register("theme.selector") do ():
-      app.themeSelector.show(app.config.themeName)
+      app.themeSelector.show(app.config.theme)
       if app.tooltip.visible: app.tooltip.hideTooltip()
 
     app.commands.bindKey({CtrlPressed, ShiftPressed}, KeyT, "file.reopenClosedTab")

@@ -113,6 +113,6 @@ proc resolveBuiltinModel*(config: AppConfig; prompt: string): tuple[provider, mo
     else:
       result = (config.aiLightweightModelProvider, config.aiLightweightModel)
   else:
-    result = effectiveBuiltinModel(config)
-  if not isBuiltinModelEnabled(config, result.provider, result.model):
+    result = effectiveModel(config)
+  if not isModelEnabled(config, result.provider, result.model):
     return ("", "")

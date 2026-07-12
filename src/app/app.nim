@@ -230,10 +230,10 @@ proc saveAppConfig(app: App) =
   saveSearchHistory(app.searchPanel.searchHistory)
 
 proc applyTheme*(app: App, name: string) =
-  if name.len == 0 or app.config.themeName == name:
+  if name.len == 0 or app.config.theme == name:
     return
   app.setTheme(name)
-  app.config.themeName = name
+  app.config.theme = name
   saveAppConfig(app)
 
 type AgentDef* = object
@@ -262,7 +262,7 @@ proc agentLabel(agentId: string): string =
 proc aiSubtitle(config: cfg.AppConfig): string =
   let agent = agentLabel(config.aiAgent)
   if config.aiAgent.toLowerAscii() == "builtin":
-    let (providerId, model) = cfg.effectiveBuiltinModel(config)
+    let (providerId, model) = cfg.effectiveModel(config)
     if model.len > 0:
       return agent & " — " & providerLabel(providerId) & " / " & model
     return agent
@@ -277,7 +277,7 @@ proc refreshThinkingControls(app: App) =
   ## builtin provider, and keep its label in sync with the configured effort.
   ## Clamps the effort to the current provider's variant set, since variants are
   ## provider-specific (e.g. DeepSeek high/max vs OpenAI minimal/low/medium/high).
-  let (providerId, _) = cfg.effectiveBuiltinModel(app.config)
+  let (providerId, _) = cfg.effectiveModel(app.config)
   let variants = reasoningVariants(providerId)
   if variants.len > 0 and app.config.aiReasoningEffort notin variants:
     app.config.aiReasoningEffort = variants[0]
@@ -298,7 +298,7 @@ proc restartAiThreadIfRunning(app: App) =
 
 proc promptApiKey(app: App, onConfirmed: proc() = nil) =
   app.inputDialog.title = "API Key"
-  let (providerId, _) = cfg.effectiveBuiltinModel(app.config)
+  let (providerId, _) = cfg.effectiveModel(app.config)
   app.inputDialog.prompt = "Enter API key for " & providerLabel(providerId) & ":"
   app.inputDialog.text = app.config.aiApiKey
   app.inputDialog.centerOnScreen(app.width, app.height)
@@ -479,7 +479,7 @@ proc showModelActionMenu(app: App, providerId, model: string) =
 proc promptBaseUrl(app: App) =
   app.inputDialog.title = "Base URL"
   app.inputDialog.prompt = "Enter base URL (empty = default):"
-  let (providerId, _) = cfg.effectiveBuiltinModel(app.config)
+  let (providerId, _) = cfg.effectiveModel(app.config)
   app.inputDialog.text = if app.config.aiBaseUrl.len > 0: app.config.aiBaseUrl else: defaultBaseUrl(providerId)
   app.inputDialog.centerOnScreen(app.width, app.height)
   app.inputDialog.onResult = proc(confirmed: bool, text: string) =
@@ -572,7 +572,7 @@ proc buildSettingsItems*(app: App): seq[SettingItem] =
     label: "Color Theme",
     description: "Current color theme (use Color Theme command to change)",
     kind: skSpecial,
-    getValue: proc(): string = app.config.themeName,
+    getValue: proc(): string = app.config.theme,
     setValue: proc(value: string) = discard
   ))
   result.add(SettingItem(
@@ -688,7 +688,7 @@ proc createApp*(config: cfg.AppConfig = cfg.defaultConfig()): App =
       app.aiThread.togglePlanMode()
   app.aiPanel.onVariantsMenu = proc(x, y: int) =
     # Reasoning-effort variants are provider-specific; build from the active model.
-    let (providerId, _) = cfg.effectiveBuiltinModel(app.config)
+    let (providerId, _) = cfg.effectiveModel(app.config)
     app.contextMenu.clear()
     for eff in reasoningVariants(providerId):
       app.contextMenu.addItem(eff, capitalizeAscii(eff), app.makeSelectEffortAction(eff))
@@ -1903,7 +1903,7 @@ proc init*(app: App) =
     app.tooltipFm = app.fm
 
   # Load theme from config
-  setTheme(loadThemeByName(app.config.themeName))
+  setTheme(loadThemeByName(app.config.theme))
 
   setIconScale(layout.scaleX)
   loadIcons()
@@ -2375,10 +2375,10 @@ proc init*(app: App) =
   app.themeSelector.onApply = proc(name: string) =
     app.applyTheme(name)
   app.themeSelector.onCancel = proc() =
-    app.setTheme(app.config.themeName)
+    app.setTheme(app.config.theme)
   app.commandPalette.registerCommand("theme.selector", "Color Theme", "Open theme selector", ccView, "",
     proc() =
-      app.themeSelector.show(app.config.themeName))
+      app.themeSelector.show(app.config.theme))
 
   # Debug commands
   app.commandPalette.registerCommand("debug.start", "Start Debugging", "Start or continue a debug session", ccDebug, "F5",
