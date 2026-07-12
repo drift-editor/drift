@@ -3,6 +3,9 @@ import uirelays
 import uirelays/screen
 import uirelays/input
 import theme, icons
+import ../utils/text
+import ../core/file_tree
+export file_tree
 
 const
   ITEM_HEIGHT = 24
@@ -13,19 +16,6 @@ const
   SCROLLBAR_WIDTH = 8
 
 type
-  FileNodeType* = enum
-    fntFile
-    fntDirectory
-
-  FileNode* = ref object
-    path*: string
-    name*: string
-    nodeType*: FileNodeType
-    isExpanded: bool
-    children: seq[FileNode]
-    parent: FileNode
-    isLoaded: bool
-
   FileExplorer* = ref object
     rootPath: string
     rootNode: FileNode
@@ -43,18 +33,6 @@ type
     visibleNodesDirty: bool
     hoveredNode*: FileNode
     bounds*: Rect
-
-proc newFileNode(path: string, parent: FileNode = nil): FileNode =
-  let nodeType = if dirExists(path): fntDirectory else: fntFile
-  FileNode(
-    path: path,
-    name: extractFilename(path),
-    nodeType: nodeType,
-    isExpanded: false,
-    children: @[],
-    parent: parent,
-    isLoaded: false
-  )
 
 proc expand(node: FileNode, explorer: FileExplorer)  # Forward declaration
 
@@ -94,9 +72,6 @@ proc expand(node: FileNode, explorer: FileExplorer) =
     node.loadChildren(explorer)
     node.isExpanded = true
 
-proc collapse(node: FileNode) =
-  node.isExpanded = false
-
 proc toggle(node: FileNode, explorer: FileExplorer) =
   if node.isExpanded:
     node.collapse()
@@ -118,46 +93,8 @@ proc getIcon(node: FileNode): IconId =
     of ".md", ".txt", ".rst": iiFile
     of ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg": iiGear
     of ".html", ".htm", ".css", ".scss", ".sass": iiFileCode
-    of ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp": iiFileMedia
+    of ".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp": iiFileMedia
     else: iiFile
-
-proc countVisibleNodes(node: FileNode): int =
-  result = 1
-  if node.isExpanded:
-    for child in node.children:
-      result += countVisibleNodes(child)
-
-proc getVisibleNodeAtIndex(node: FileNode, targetIdx: int, varIdx: var int): FileNode =
-  if varIdx == targetIdx:
-    return node
-  varIdx += 1
-  if node.isExpanded:
-    for child in node.children:
-      let found = getVisibleNodeAtIndex(child, targetIdx, varIdx)
-      if found != nil:
-        return found
-  nil
-
-proc getNodeIndex(node: FileNode, target: FileNode, varIdx: var int): int =
-  if node == target:
-    return varIdx
-  result = -1
-  varIdx += 1
-  if node.isExpanded:
-    for child in node.children:
-      let idx = getNodeIndex(child, target, varIdx)
-      if idx >= 0:
-        return idx
-
-proc findNodeByPath(node: FileNode, path: string): FileNode =
-  if node.path == path:
-    return node
-  if node.isExpanded:
-    for child in node.children:
-      let found = findNodeByPath(child, path)
-      if found != nil:
-        return found
-  nil
 
 proc buildVisibleNodes(explorer: FileExplorer) =
   if not explorer.visibleNodesDirty:
@@ -446,20 +383,6 @@ proc handleInput*(explorer: FileExplorer, e: Event, bounds: Rect): bool =
   false
 
 # Rendering
-
-proc truncateText(text: string, font: Font, maxWidth: int): string =
-  if maxWidth <= 0:
-    return ""
-  let fullW = measureText(font, text).w
-  if fullW <= maxWidth:
-    return text
-  var displayName = text
-  while displayName.len > 3:
-    let w = measureText(font, displayName & "...").w
-    if w <= maxWidth:
-      return displayName & "..."
-    displayName.setLen(displayName.len - 1)
-  "..."
 
 proc renderNode(node: FileNode, explorer: FileExplorer, depth: int, varY: var int,
                 bounds: Rect, font: Font, cont: seq[bool] = @[]) =

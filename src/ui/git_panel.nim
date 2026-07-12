@@ -4,6 +4,7 @@ import uirelays/screen
 import uirelays/input
 import theme, icons
 import ../services/git as gitcmd
+import ../utils/text
 
 const
   HeaderHeight = 40
@@ -490,20 +491,6 @@ proc drawDiffStats(font: Font, x, y: int, added, removed: int) =
   if removed > 0:
     let text = "-" & $removed
     discard drawText(font, cx, y, text, currentTheme.getColor(tcError), color(0, 0, 0, 0))
-
-proc truncateText(text: string, font: Font, maxWidth: int): string =
-  if maxWidth <= 0:
-    return ""
-  let fullW = measureText(font, text).w
-  if fullW <= maxWidth:
-    return text
-  var displayName = text
-  while displayName.len > 3:
-    let w = measureText(font, displayName & "...").w
-    if w <= maxWidth:
-      return displayName & "..."
-    displayName.setLen(displayName.len - 1)
-  "..."
 
 proc drawFilePath(font: Font, x, y: int, filePath: string, maxWidth: int, textC, textMuted: Color) =
   let fileName = extractFilename(filePath)

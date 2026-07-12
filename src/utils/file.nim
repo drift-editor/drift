@@ -1,8 +1,9 @@
 import std/[os, strutils]
+import ../core/types
 
 proc isImageFile*(path: string): bool =
   let ext = path.splitFile.ext.toLowerAscii()
-  ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"]
+  ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"]
 
 proc isBinaryFile*(path: string): bool =
   if not fileExists(path):
@@ -21,9 +22,10 @@ proc isBinaryFile*(path: string): bool =
   except IOError:
     false
 
-proc detectLineEnding*(text: string): string =
-  if text.contains("\c\L"): "CRLF"
-  else: "LF"
+proc detectLineEnding*(text: string): LineEnding =
+  if "\r\n" in text: leCrLf
+  elif '\r' in text: leCr
+  else: leLf
 
 proc languageIdFor*(path: string): string =
   if path.len == 0:
@@ -42,6 +44,13 @@ proc languageIdFor*(path: string): string =
   of ".html", ".htm": "html"
   of ".xml": "xml"
   of ".md", ".markdown": "markdown"
+  else: ""
+
+proc getUntrackedFileContent*(path, filePath: string): string =
+  ## Read the full content of an untracked file for review.
+  let fullPath = path / filePath
+  if fileExists(fullPath):
+    try: readFile(fullPath) except CatchableError: ""
   else: ""
 
 proc pathStartsWith*(path, prefix: string): bool =

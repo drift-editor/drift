@@ -1,3 +1,19 @@
+import uirelays
+
+proc truncateText*(text: string, font: Font, maxWidth: int): string =
+  if maxWidth <= 0:
+    return ""
+  let fullW = measureText(font, text).w
+  if fullW <= maxWidth:
+    return text
+  var displayName = text
+  while displayName.len > 3:
+    let w = measureText(font, displayName & "...").w
+    if w <= maxWidth:
+      return displayName & "..."
+    displayName.setLen(displayName.len - 1)
+  "..."
+
 proc splitLinesKeep*(s: string): seq[string] =
   ## Like splitLines but preserves the trailing empty line when the string ends with a newline.
   ## Handles \\r\\n, \\r, and \\n.

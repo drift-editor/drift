@@ -5,6 +5,7 @@ import uirelays
 import uirelays/screen
 import uirelays/input
 import theme, icons
+import ../utils/text
 
 # LSP severity levels
 const
@@ -90,15 +91,6 @@ proc severityColor(severity: int): Color =
   of SeverityWarning: currentTheme.getColor(tcWarning)
   of SeverityInfo:    currentTheme.getColor(tcInfo)
   else:               currentTheme.getColor(tcTextSecondary)
-
-proc truncateText(text: string; font: Font; maxWidth: int): string =
-  if maxWidth <= 0: return ""
-  if measureText(font, text).w <= maxWidth: return text
-  var s = text
-  while s.len > 3:
-    if measureText(font, s & "...").w <= maxWidth: return s & "..."
-    s.setLen(s.len - 1)
-  "..."
 
 proc hasError(entries: seq[DiagnosticEntry]): bool =
   for e in entries:

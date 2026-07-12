@@ -155,9 +155,4 @@ proc getFileDiff*(path, filePath: string; staged: bool = false): string =
   let (output, exitCode) = execGitCommand(args, path)
   if exitCode == 0: output else: ""
 
-proc getUntrackedFileContent*(path, filePath: string): string =
-  ## Read the full content of an untracked file for review.
-  let fullPath = path / filePath
-  if fileExists(fullPath):
-    try: readFile(fullPath) except CatchableError: ""
-  else: ""
+

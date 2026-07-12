@@ -131,23 +131,6 @@ type
     spGit = "git"
     spExtensions = "extensions"
   
-  ## Git Types
-  
-  GitFileStatusEnum* = enum
-    gfsUnmodified = "unmodified"
-    gfsModified = "modified"
-    gfsAdded = "added"
-    gfsDeleted = "deleted"
-    gfsRenamed = "renamed"
-    gfsUntracked = "untracked"
-    gfsIgnored = "ignored"
-  
-  GitInfo* = object
-    branch*: string
-    hasChanges*: bool
-    ahead*: int
-    behind*: int
-  
   ## Syntax Highlighting Types
   
   HighlightTokenType* = enum
@@ -268,6 +251,12 @@ proc contains*(sel: Selection, pos: CursorPos): bool =
   pos >= start and pos <= finish
 
 # Default Metadata
+
+proc `$`*(le: LineEnding): string =
+  case le
+  of leLf: "LF"
+  of leCrLf: "CRLF"
+  of leCr: "CR"
 
 proc defaultMetadata*(): DocumentMetadata =
   DocumentMetadata(

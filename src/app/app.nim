@@ -958,7 +958,7 @@ proc updateStatus(app: App) =
       rightSections = @[
         "Ln " & $(currLine + 1) & ", Col " & $(currCol + 1),
         "UTF-8",
-        lineEnding,
+        $lineEnding,
         lang,
         app.lspStatusString(),
         app.dapStatusString(),
@@ -1161,10 +1161,10 @@ proc reviewChanges*(app: App) =
   var fileList = ""
   for f in allStatus:
     var parts: seq[string]
-    if f.stagedStatus != gfsUnmodified:
+    if f.stagedStatus != gitcmd.gfsUnmodified:
       parts.add("staged")
-    if f.workingStatus != gfsUnmodified:
-      if f.workingStatus == gfsUntracked:
+    if f.workingStatus != gitcmd.gfsUnmodified:
+      if f.workingStatus == gitcmd.gfsUntracked:
         parts.add("new")
       else:
         parts.add("unstaged")

@@ -2,6 +2,7 @@ import std/[os, sets, sequtils]
 import uirelays
 import uirelays/screen
 import theme, icons, context_menu
+import ../utils/text
 
 const
   LEFT_MARGIN = 80
@@ -87,20 +88,6 @@ proc newWelcomeScreen*(): WelcomeScreen =
   screen.sections.add(helpSection)
 
   screen
-
-proc truncateText(text: string, font: Font, maxWidth: int): string =
-  if maxWidth <= 0:
-    return ""
-  let fullW = measureText(font, text).w
-  if fullW <= maxWidth:
-    return text
-  var displayName = text
-  while displayName.len > 3:
-    let w = measureText(font, displayName & "...").w
-    if w <= maxWidth:
-      return displayName & "..."
-    displayName.setLen(displayName.len - 1)
-  "..."
 
 proc refreshRecentSection(screen: WelcomeScreen) =
   ## Rebuild the Recent section from screen.recentFiles and screen.pinnedPaths.
