@@ -118,19 +118,13 @@ type
     range*: LSPRange
   
   ## UI Types
-  
+
   NotificationType* = enum
     ntInfo = "info"
     ntWarning = "warning"
     ntError = "error"
     ntSuccess = "success"
-  
-  SidebarPanel* = enum
-    spExplorer = "explorer"
-    spSearch = "search"
-    spGit = "git"
-    spExtensions = "extensions"
-  
+
   ## Syntax Highlighting Types
   
   HighlightTokenType* = enum
@@ -163,13 +157,6 @@ type
     ftText = "text"
     ftBinary = "binary"
     ftUnknown = "unknown"
-  
-  FileInfo* = object
-    name*: string
-    path*: string
-    isDirectory*: bool
-    size*: int64
-    modified*: float64
 
 # Color Constants
 
