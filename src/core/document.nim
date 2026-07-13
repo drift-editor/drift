@@ -338,14 +338,6 @@ proc redo*(doc: Document): Result[CursorPos] =
 
 # Utility Operations
 
-proc detectLineEnding*(content: string): LineEnding =
-  if "\r\n" in content:
-    leCrLf
-  elif '\r' in content:
-    leCr
-  else:
-    leLf
-
 proc getWordAt*(doc: Document, pos: CursorPos): tuple[start, finish: CursorPos, word: string] =
   let lineResult = doc.getLine(pos.line)
   if lineResult.isErr:

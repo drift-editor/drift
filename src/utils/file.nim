@@ -1,5 +1,4 @@
 import std/[os, strutils]
-import ../core/types
 
 proc isImageFile*(path: string): bool =
   let ext = path.splitFile.ext.toLowerAscii()
@@ -21,11 +20,6 @@ proc isBinaryFile*(path: string): bool =
     false
   except IOError:
     false
-
-proc detectLineEnding*(text: string): LineEnding =
-  if "\r\n" in text: leCrLf
-  elif '\r' in text: leCr
-  else: leLf
 
 proc languageIdFor*(path: string): string =
   if path.len == 0:

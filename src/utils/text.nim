@@ -1,4 +1,11 @@
+import std/strutils
 import uirelays
+import ../core/types
+
+proc detectLineEnding*(text: string): LineEnding =
+  if text.contains("\r\n"): leCrLf
+  elif text.contains("\r"): leCr
+  else: leLf
 
 proc truncateText*(text: string, font: Font, maxWidth: int): string =
   if maxWidth <= 0:
