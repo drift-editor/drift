@@ -1,7 +1,7 @@
 # Drift Enhancement Implementation Progress
 
 > This document tracks the implementation status of specs defined in `enhancement_specs.md`.
-> Last updated: 2026-07-08
+> Last updated: 2026-07-13
 
 ## Recent Completion Snapshot
 
@@ -38,22 +38,22 @@ The following features were implemented in the current development push (most re
 | **D1** | Bracket/quote match highlight | ✅ Implemented | `501e389` | |
 | **D2** | Jump to matching bracket | ✅ Implemented | `158b907` | |
 | **D3** | Smart auto-indent | ⏸️ Deferred | drift-editor/drift#28 | Needs SynEdit indent hooks. |
-| **D4** | Auto-save | ⏳ Not started | — | |
-| **D5** | Auto-reload changed files | ⏳ Not started | — | |
-| **D6** | Duplicate selection | ⏳ Not started | — | |
-| **D7** | Cycle clipboard ring | ⏳ Not started | — | |
-| **D8** | Unsaved-change indicator | ⏳ Not started | — | |
+| **D4** | Auto-save | ✅ Implemented | — | Auto-save after configurable idle delay; `config.autoSave` / `config.autoSaveDelayMs`; settings picker toggle. |
+| **D5** | Auto-reload changed files | ✅ Implemented | — | `fileWatcherAutoReload` config key; silently reloads unmodified buffers, prompts on conflict. |
+| **D6** | Duplicate selection | ✅ Implemented | — | `Ctrl+D` duplicates selection or current line; `edit.duplicateSelection` command. |
+| **D7** | Cycle clipboard ring | ✅ Implemented | — | `Ctrl+Shift+V` cycles clipboard history; `edit.cycleClipboard` command. |
+| **D8** | Unsaved-change indicator | ✅ Implemented | — | Shows ` *` suffix on tab label and title bar when buffer is dirty. |
 | **D9** | Tab close on middle-click | ✅ Implemented | `8421066` | |
 | **D10** | Recent-file path tooltip | ⏳ Not started | — | |
-| **D11** | Pinned recent files | ⏳ Not started | — | |
-| **D12** | Reopen closed tab | ⏳ Not started | — | |
-| **D13** | Persist search options | ⏳ Not started | — | |
+| **D11** | Pinned recent files | ✅ Implemented | — | Right-click recent file → Pin/Unpin; persists in `config.pinnedRecentFiles`. |
+| **D12** | Reopen closed tab | ✅ Implemented | — | `Ctrl+Shift+T` reopens last closed buffer from history; configurable `closedTabHistorySize`. |
+| **D13** | Persist search options | ✅ Implemented | — | `searchRememberOptions` config key; search options saved across sessions. |
 | **D14** | Find result counter | ⏳ Not started | — | |
-| **D15** | Search history | ⏳ Not started | — | |
-| **D16** | Workspace search async | ⏳ Not started | — | |
+| **D15** | Search history | ✅ Implemented | — | Up/Down cycles previous queries; persists to `search_history.json` with cap of 20. |
+| **D16** | Workspace search async | ✅ Implemented | — | Background thread via `search_engine.nim`; UI stays responsive during search. |
 | **D17** | Global find results panel | ⏳ Not started | — | |
-| **D18** | Line ending display | ⏳ Not started | — | |
-| **D19** | Encoding display | ⏳ Not started | — | |
+| **D18** | Line ending display | ✅ Implemented | — | Shows `CRLF`/`LF` in status bar; click to toggle line endings. |
+| **D19** | Encoding display | ✅ Implemented | — | Shows `UTF-8` in status bar; click shows "Encoding is fixed to UTF-8" notification. |
 | **D20** | LSP status hover | ✅ Implemented | `e356503` | |
 | **D21** | Hover tooltip markdown | ⏭️ Skipped | — | Explicitly skipped by user. |
 | **D22** | Argument-aware commands | ✅ Implemented | `bbcf3c1` | |
@@ -102,3 +102,7 @@ All deferred features are tracked in [drift-editor/drift#28](https://github.com/
 
 - Last successful build: `nim c -o:drift src/drift.nim` (SuccessX, ~188496 lines) after `501e389`.
 - No commits have been pushed yet.
+
+## Note
+
+Several features (D4-D8, D11-D13, D15-D16, D18-D19) were discovered as already implemented during a 2026-07-13 code audit. They had been built alongside the main development push but were not individually tracked in this document. Only D10 (recent-file path tooltip), D14 (find result counter), and D17 (global find results panel) remain genuinely not started among the non-deferred specs.
