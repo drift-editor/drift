@@ -200,6 +200,14 @@ template initCommands*(app: untyped): untyped =
           app.pushClipboardHistory(text)
           ed.insertText("")
 
+    app.commands.bindKey({CtrlPressed}, KeyV, "edit.paste")
+    app.commands.register("edit.paste") do ():
+      withEd:
+        let clip = getClipboardText()
+        if clip.len > 0:
+          ed.insertText(clip)
+          app.pushClipboardHistory(clip)
+
     app.commands.bindKey({CtrlPressed, ShiftPressed}, KeyV, "edit.cycleClipboard")
     app.commands.register("edit.cycleClipboard") do ():
       withEd:

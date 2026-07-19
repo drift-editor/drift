@@ -299,8 +299,8 @@ proc lspThreadProc(t: LSPThread) {.thread.} =
 
 proc newLSPThread*(serverName: string = "minlsp"; language: string = "nim"; initOptions: JsonNode = nil): LSPThread =
   result = LSPThread()
-  result.reqChan = newSPSChannel[LSPMessage](64)
-  result.respChan = newSPSChannel[LSPMessage](256)
+  result.reqChan = newSPSChannel[LSPMessage](256)
+  result.respChan = newSPSChannel[LSPMessage](512)
   createThread(result.thread, lspThreadProc, result)
   let opts = if initOptions != nil: initOptions else: newJObject()
   let initMsg = LSPMessage(kind: lmkReady, str1: serverName, str2: language, jsonData: opts)

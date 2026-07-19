@@ -1063,12 +1063,18 @@ proc run*(app: App) =
                 app.aiPanel.onNewSession())
             app.contextMenu.showAt(e.x, e.y)
             discard app.gi.consume()
-        else:
+        elif app.currentBuffer >= 0 and editorBounds.contains(point(e.x, e.y)):
           app.contextMenu.clear()
-          app.contextMenu.addItem("cut", "Cut", proc() = discard)
-          app.contextMenu.addItem("copy", "Copy", proc() = discard)
-          app.contextMenu.addItem("paste", "Paste", proc() = discard)
-          app.contextMenu.showAt(e.x, e.y)
+          let hasSelection = app.buffers[app.currentBuffer].ed.getSelectedText().len > 0
+          if hasSelection:
+            app.contextMenu.addItem("cut", "Cut", proc() =
+              app.commands.exec("edit.cut"))
+            app.contextMenu.addItem("copy", "Copy", proc() =
+              app.commands.exec("edit.copy"))
+          app.contextMenu.addItem("paste", "Paste", proc() =
+            app.commands.exec("edit.paste"))
+          if hasSelection or getClipboardText().len > 0:
+            app.contextMenu.showAt(e.x, e.y)
           discard app.gi.consume()
 
     if e.kind == MouseMoveEvent:
